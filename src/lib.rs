@@ -4,7 +4,7 @@ extern crate log;
 use bytes::Buf;
 use bytes::BytesMut;
 use pin_project::pin_project;
-use std::net::{SocketAddr, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::prelude::*;
@@ -33,13 +33,13 @@ pub enum Error {
     IPAddress(#[from] std::net::AddrParseError),
 
     #[error("Invalid port in proxy header: {0}")]
-    Port(#[from] std::num::ParseIntError)
+    Port(#[from] std::num::ParseIntError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 const MAX_HEADER_SIZE: usize = 536;
-const MIN_MEADER_SIZE: usize = 15;
+const MIN_HEADER_SIZE: usize = 15;
 
 fn parse_proxy_header_v1(buf: &mut BytesMut) -> Result<(Option<SocketAddr>, Option<SocketAddr>)> {
     let eol_pos = buf
@@ -49,32 +49,28 @@ fn parse_proxy_header_v1(buf: &mut BytesMut) -> Result<(Option<SocketAddr>, Opti
         .ok_or(Error::Proxy("Missing EOL in proxy v1 protocol".into()))?
         .0;
 
-    let header = buf.split_to(eol_pos+2);
-    let header = std::str::from_utf8(&header[..header.len()-2])?;
+    let header = buf.split_to(eol_pos + 2);
+    let header = std::str::from_utf8(&header[..header.len() - 2])?;
     debug!("Proxy header is {}", header);
     let parts: Vec<_> = header.split(' ').collect();
     if parts.len() < 2 {
-        return Err(Error::Proxy("At least two parts are needed".into()))
+        return Err(Error::Proxy("At least two parts are needed".into()));
     }
     match parts[1] {
         "UNKNOWN" => Ok((None, None)),
         "TCP4" if parts.len() == 6 => {
-            let orig_sender_addr:Ipv4Addr = parts[2].parse()?;
+            let orig_sender_addr: Ipv4Addr = parts[2].parse()?;
             let orig_sender_port: u16 = parts[4].parse()?;
-            let orig_receipient_addr:Ipv4Addr = parts[3].parse()?;
-            let orig_receipient_port: u16 = parts[5].parse()?;
+            let orig_recipient_addr: Ipv4Addr = parts[3].parse()?;
+            let orig_recipient_port: u16 = parts[5].parse()?;
 
             Ok((
                 Some((orig_sender_addr, orig_sender_port).into()),
-                Some((orig_receipient_addr, orig_receipient_port).into()),
-        
+                Some((orig_recipient_addr, orig_recipient_port).into()),
             ))
         }
-        "TCP6" if parts.len() == 6 => {
-            unimplemented!()
-        }
-        _ => Err(Error::Proxy(format!("Invalid proxy header v1: {}", header)))
-
+        "TCP6" if parts.len() == 6 => unimplemented!(),
+        _ => Err(Error::Proxy(format!("Invalid proxy header v1: {}", header))),
     }
 }
 
@@ -88,7 +84,7 @@ impl<T: AsyncRead> ProxiedStream<T> {
             }
         }
 
-        if buf.remaining() < MIN_MEADER_SIZE {
+        if buf.remaining() < MIN_HEADER_SIZE {
             return Err(Error::Proxy("Message too short for proxy protocol".into()));
         }
         debug!("Buffered initial {} bytes", buf.remaining());
@@ -134,8 +130,19 @@ impl<T: AsyncRead> AsyncRead for ProxiedStream<T> {
             // send remaining data from buffer
             let to_copy = this.buf.remaining().min(buf.len());
             this.buf.copy_to_slice(&mut buf[0..to_copy]);
-            Poll::Ready(Ok(to_copy))
-            //TODO: if there is more capacity in buf poll inner stream
+
+            //there is still space in output buffer
+            // let's try if we have some bytes to add there
+            if to_copy < buf.len() {
+                let added = match this.inner.poll_read(ctx, &mut buf[to_copy..]) {
+                    Poll::Ready(Ok(n)) => n,
+                    Poll::Ready(Err(e)) => return Err(e).into(),
+                    Poll::Pending => 0,
+                };
+                Poll::Ready(Ok(to_copy + added))
+            } else {
+                Poll::Ready(Ok(to_copy))
+            }
         }
     }
 }
@@ -168,8 +175,14 @@ mod tests {
         env_logger::try_init().ok();
         let message = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHELLO".as_bytes();
         let mut ps = ProxiedStream::new(message).await?;
-        assert_eq!("192.168.0.1:56324".parse::<SocketAddr>().unwrap(), ps.original_peer_addr().unwrap());
-        assert_eq!("192.168.0.11:443".parse::<SocketAddr>().unwrap(), ps.original_destination_addr().unwrap());
+        assert_eq!(
+            "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
+            ps.original_peer_addr().unwrap()
+        );
+        assert_eq!(
+            "192.168.0.11:443".parse::<SocketAddr>().unwrap(),
+            ps.original_destination_addr().unwrap()
+        );
         let mut buf = Vec::new();
         ps.read_to_end(&mut buf).await?;
         assert_eq!(b"HELLO", &buf[..]);
