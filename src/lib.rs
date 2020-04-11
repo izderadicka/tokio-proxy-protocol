@@ -100,7 +100,7 @@ impl<T: AsyncRead> ProxiedStream<T> {
                 orig_destination,
             })
         } else {
-            Err(Error::Proxy("Only v1 proxy protocol supported".into()))
+            Err(Error::Proxy(format!("Only v1 proxy protocol supported - header start{:?}", &buf[0..6])))
         }
     }
 
@@ -186,6 +186,23 @@ mod tests {
         let mut buf = Vec::new();
         ps.read_to_end(&mut buf).await?;
         assert_eq!(b"HELLO", &buf[..]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_v1_unknown_long_message() -> Result<()> {
+        env_logger::try_init().ok();
+        let mut message = "PROXY UNKNOWN\r\n".to_string();
+        const DATA_LENGTH: usize = 1_000_000;
+        let data = (b'A'..=b'Z').cycle().take(DATA_LENGTH).map(|c| c as char);
+        message.extend(data);
+
+        let mut ps = ProxiedStream::new(message.as_bytes()).await?;
+        assert!(ps.original_peer_addr().is_none());
+        assert!(ps.original_destination_addr().is_none());
+        let mut buf = Vec::new();
+        ps.read_to_end(&mut buf).await?;
+        assert_eq!(DATA_LENGTH, buf.len());
         Ok(())
     }
 }
