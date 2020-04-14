@@ -2,14 +2,31 @@
 extern crate log;
 
 use anyhow::{Context, Result};
-use tokio::{net::{TcpListener, TcpStream}, prelude::*, stream::StreamExt, };
-use tokio_proxy_protocol::ProxiedStream;
 use futures::future::TryFutureExt;
+use structopt::StructOpt;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    prelude::*,
+    stream::StreamExt,
+};
+use tokio_proxy_protocol::Builder;
 
-async fn process_socket(mut socket: TcpStream) -> Result<()>{
+#[derive(Debug, StructOpt)]
+#[structopt(name = "example", about = "An example of StructOpt usage.")]
+struct Args {
+    // TCP Socket to listen on - addr:port
+    #[structopt(short, long, default_value = "127.0.0.1:7776")]
+    listen: std::net::SocketAddr,
+}
+
+async fn process_socket(socket: TcpStream) -> Result<()> {
     debug!("Got connection from {:?}", socket.peer_addr());
-    let mut socket = ProxiedStream::new(socket).await?;
-    debug!("Original proxied connection was from {:?} to {:?}", socket.original_peer_addr(), socket.original_destination_addr());
+    let mut socket = Builder::new().wrap(socket).await?;
+    debug!(
+        "Original proxied connection was from {:?} to {:?}",
+        socket.original_peer_addr(),
+        socket.original_destination_addr()
+    );
     let mut buf = [0u8; 1024];
     let mut count = 0;
     while let Ok(n) = socket.read(&mut buf).await {
@@ -29,21 +46,20 @@ async fn process_socket(mut socket: TcpStream) -> Result<()>{
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
+    let args = Args::from_args();
 
-    let port: u16 = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "7776".into())
-        .parse()
-        .context("Invalid port argument")?;
-    info!("Starting server on localhost port {}", port);
-    let mut server = TcpListener::bind(("127.0.0.1", port))
+    info!("Starting server on localhost port {}", args.listen);
+    let mut server = TcpListener::bind(args.listen)
         .await
         .context("Cannot bind server")?;
 
     while let Some(socket) = server.next().await {
         match socket {
             Ok(socket) => {
-                tokio::spawn(process_socket(socket).map_err(|e| error!("Error while processing socket {}", e)));
+                tokio::spawn(
+                    process_socket(socket)
+                        .map_err(|e| error!("Error while processing socket {}", e)),
+                );
             }
             Err(e) => error!("Error accepting socket: {}", e),
         }
