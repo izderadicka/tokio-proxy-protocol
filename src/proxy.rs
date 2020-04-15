@@ -58,6 +58,9 @@ impl Decoder for ProxyProtocolCodecV1 {
 
             debug!("Proxy header is {}", header);
             let parts: Vec<_> = header.split(' ').collect();
+            if parts[0] != "PROXY" {
+                return Err(Error::Proxy("Protocol tag is wrong".into()));
+            }
             if parts.len() < 2 {
                 return Err(Error::Proxy("At least two parts are needed".into()));
             }
