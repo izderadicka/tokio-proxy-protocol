@@ -4,11 +4,18 @@ extern crate log;
 use bytes::Buf;
 use bytes::BytesMut;
 use pin_project::pin_project;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
+use tokio_util::codec::Decoder;
+
+use error::{Error, Result};
+use proxy::{ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
+
+pub mod error;
+pub mod proxy;
 
 const V1_TAG: &[u8] = b"PROXY ";
 const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
@@ -34,7 +41,7 @@ impl Default for Builder {
 impl Builder {
     pub async fn wrap<T: AsyncRead>(self, mut stream: T) -> Result<ProxiedStream<T>> {
         let mut buf = BytesMut::with_capacity(MAX_HEADER_SIZE);
-        while buf.len() < MAX_HEADER_SIZE { //TODO: This is not correct - it'll not work if incoming request is small!
+        while buf.len() < MIN_HEADER_SIZE {
             let r = stream.read_buf(&mut buf).await?;
             if r == 0 {
                 break;
@@ -42,21 +49,38 @@ impl Builder {
         }
 
         if buf.remaining() < MIN_HEADER_SIZE {
-            return Err(Error::Proxy("Message too short for proxy protocol".into()));
+            return if self.require_proxy_header {
+                Err(Error::Proxy("Message too short for proxy protocol".into()))
+            } else {
+                Ok(ProxiedStream {
+                    inner: stream,
+                    buf,
+                    orig_source: None,
+                    orig_destination: None,
+                })
+            };
         }
+
         debug!("Buffered initial {} bytes", buf.remaining());
 
         if &buf[0..6] == V1_TAG && self.support_v1 {
             debug!("Detected proxy protocol v1 tag");
-            let (orig_source, orig_destination) =
-                parse_proxy_header_v1(&mut buf, self.pass_proxy_header)?;
+            let mut codec = ProxyProtocolCodecV1::new_with_pass_header(self.pass_proxy_header);
+            loop {
+                if let Some(proxy_info) = codec.decode(&mut buf)? {
+                    return Ok(ProxiedStream {
+                        inner: stream,
+                        buf,
+                        orig_source: proxy_info.original_source,
+                        orig_destination: proxy_info.original_destination,
+                    });
+                }
 
-            Ok(ProxiedStream {
-                inner: stream,
-                buf,
-                orig_source,
-                orig_destination,
-            })
+                let r = stream.read_buf(&mut buf).await?;
+                if r == 0 {
+                    return Err(Error::Proxy("Incomplete V1 header".into()));
+                }
+            }
         } else if &buf[0..12] == V2_TAG && self.support_v2 {
             debug!("Detected proxy protocol v2 tag");
             unimplemented!("V2 not yet implemented")
@@ -115,29 +139,6 @@ pub struct ProxiedStream<T> {
     orig_destination: Option<SocketAddr>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("Proxy protocol error: {0}")]
-    Proxy(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
-
-    #[error("Invalid encoding of proxy header: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
-
-    #[error("Invalid address in proxy header: {0}")]
-    IPAddress(#[from] std::net::AddrParseError),
-
-    #[error("Invalid port in proxy header: {0}")]
-    Port(#[from] std::num::ParseIntError),
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-const MAX_HEADER_SIZE: usize = 536;
-const MIN_HEADER_SIZE: usize = 15;
-
 fn create_proxy_header_v1(source: SocketAddr, destination: SocketAddr) -> Vec<u8> {
     let mut header = b"PROXY ".to_vec();
     let proto = match source {
@@ -169,46 +170,6 @@ fn create_proxy_header_v1(source: SocketAddr, destination: SocketAddr) -> Vec<u8
     header
 }
 
-fn parse_proxy_header_v1(
-    buf: &mut BytesMut,
-    pass_header: bool,
-) -> Result<(Option<SocketAddr>, Option<SocketAddr>)> {
-    let eol_pos = buf
-        .windows(2)
-        .position(|w| w == b"\r\n")
-        .ok_or_else(|| Error::Proxy("Missing EOL in proxy v1 protocol".into()))?;
-
-    let header = std::str::from_utf8(&buf[..eol_pos])?;
-
-    debug!("Proxy header is {}", header);
-    let parts: Vec<_> = header.split(' ').collect();
-    if parts.len() < 2 {
-        return Err(Error::Proxy("At least two parts are needed".into()));
-    }
-    let res = match parts[1] {
-        "UNKNOWN" => Ok((None, None)),
-        "TCP4" if parts.len() == 6 => {
-            let orig_sender_addr: Ipv4Addr = parts[2].parse()?;
-            let orig_sender_port: u16 = parts[4].parse()?;
-            let orig_recipient_addr: Ipv4Addr = parts[3].parse()?;
-            let orig_recipient_port: u16 = parts[5].parse()?;
-
-            Ok((
-                Some((orig_sender_addr, orig_sender_port).into()),
-                Some((orig_recipient_addr, orig_recipient_port).into()),
-            ))
-        }
-        "TCP6" if parts.len() == 6 => unimplemented!(),
-        _ => Err(Error::Proxy(format!("Invalid proxy header v1: {}", header))),
-    };
-
-    if !pass_header {
-        buf.advance(eol_pos + 2);
-    }
-
-    res
-}
-
 impl<T> ProxiedStream<T> {
     fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
         self.project().inner
@@ -220,6 +181,12 @@ impl<T> ProxiedStream<T> {
 
     pub fn original_destination_addr(&self) -> Option<SocketAddr> {
         self.orig_destination
+    }
+}
+
+impl<T: AsyncRead> ProxiedStream<T> {
+    pub async fn new(stream: T) -> Result<Self> {
+        Builder::default().wrap(stream).await
     }
 }
 
@@ -354,7 +321,7 @@ mod tests {
         let data = (b'A'..=b'Z').cycle().take(DATA_LENGTH).map(|c| c as char);
         message.extend(data);
 
-        let mut ps = Builder::new().wrap(message.as_bytes()).await?;
+        let mut ps = ProxiedStream::new(message.as_bytes()).await?;
         assert!(ps.original_peer_addr().is_none());
         assert!(ps.original_destination_addr().is_none());
         let mut buf = Vec::new();
@@ -367,7 +334,7 @@ mod tests {
     async fn test_no_proxy_header_passed() -> Result<()> {
         env_logger::try_init().ok();
         let message = b"MEMAM PROXY HEADER, CHUDACEK JA";
-        let mut ps = Builder::new().wrap(&message[..]).await?;
+        let mut ps = ProxiedStream::new(&message[..]).await?;
         assert!(ps.original_peer_addr().is_none());
         assert!(ps.original_destination_addr().is_none());
         let mut buf = Vec::new();
