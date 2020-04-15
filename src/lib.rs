@@ -34,7 +34,7 @@ impl Default for Builder {
 impl Builder {
     pub async fn wrap<T: AsyncRead>(self, mut stream: T) -> Result<ProxiedStream<T>> {
         let mut buf = BytesMut::with_capacity(MAX_HEADER_SIZE);
-        while buf.len() < MAX_HEADER_SIZE {
+        while buf.len() < MAX_HEADER_SIZE { //TODO: This is not correct - it'll not work if incoming request is small!
             let r = stream.read_buf(&mut buf).await?;
             if r == 0 {
                 break;
@@ -175,10 +175,8 @@ fn parse_proxy_header_v1(
 ) -> Result<(Option<SocketAddr>, Option<SocketAddr>)> {
     let eol_pos = buf
         .windows(2)
-        .enumerate()
-        .find(|(_, w)| w == b"\r\n")
-        .ok_or_else(|| Error::Proxy("Missing EOL in proxy v1 protocol".into()))?
-        .0;
+        .position(|w| w == b"\r\n")
+        .ok_or_else(|| Error::Proxy("Missing EOL in proxy v1 protocol".into()))?;
 
     let header = std::str::from_utf8(&buf[..eol_pos])?;
 
@@ -277,8 +275,7 @@ impl<T: AsyncWrite> ProxiedStream<T> {
         original_source: SocketAddr,
         original_destination: SocketAddr,
     ) -> Result<()> {
-        let mut this = self.project();
-        this.inner
+        self.get_pin_mut()
             .write(&create_proxy_header_v1(
                 original_source,
                 original_destination,
