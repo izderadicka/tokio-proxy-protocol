@@ -9,10 +9,10 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
-use tokio_util::codec::Decoder;
+use tokio_util::codec::{Decoder, Encoder};
 
 use error::{Error, Result};
-use proxy::{ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
+use proxy::{ProxyInfo, ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
 
 pub mod error;
 pub mod proxy;
@@ -139,37 +139,6 @@ pub struct ProxiedStream<T> {
     orig_destination: Option<SocketAddr>,
 }
 
-fn create_proxy_header_v1(source: SocketAddr, destination: SocketAddr) -> Vec<u8> {
-    let mut header = b"PROXY ".to_vec();
-    let proto = match source {
-        SocketAddr::V4(_) => {
-            if let SocketAddr::V6(_) = destination {
-                panic!("Both source and destination must have same version")
-            }
-            b"TCP4"
-        }
-        SocketAddr::V6(_) => {
-            if let SocketAddr::V6(_) = destination {
-                panic!("Both source and destination must have same version")
-            }
-            b"TCP6"
-        }
-    };
-    header.extend(proto);
-    header.extend(
-        format!(
-            " {} {} {} {}\r\n",
-            source.ip(),
-            destination.ip(),
-            source.port(),
-            destination.port()
-        )
-        .as_bytes(),
-    );
-
-    header
-}
-
 impl<T> ProxiedStream<T> {
     fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
         self.project().inner
@@ -221,33 +190,10 @@ impl<T: AsyncRead> AsyncRead for ProxiedStream<T> {
 }
 
 impl<T: AsyncWrite + Unpin> ProxiedStream<T> {
-    pub async fn send_proxy_header_v1(
-        &mut self,
-        original_source: SocketAddr,
-        original_destination: SocketAddr,
-    ) -> Result<()> {
-        self.inner
-            .write(&create_proxy_header_v1(
-                original_source,
-                original_destination,
-            ))
-            .await?;
-        Ok(())
-    }
-}
-
-impl<T: AsyncWrite> ProxiedStream<T> {
-    pub async fn send_proxy_header_v1_pinned(
-        self: Pin<&mut Self>,
-        original_source: SocketAddr,
-        original_destination: SocketAddr,
-    ) -> Result<()> {
-        self.get_pin_mut()
-            .write(&create_proxy_header_v1(
-                original_source,
-                original_destination,
-            ))
-            .await?;
+    pub async fn send_proxy_header_v1(&mut self, item: ProxyInfo) -> Result<()> {
+        let mut data = BytesMut::new();
+        ProxyProtocolCodecV1::new().encode(item, &mut data)?;
+        self.inner.write(&data).await?;
         Ok(())
     }
 }
@@ -377,15 +323,5 @@ mod tests {
         ps.read_to_end(&mut buf).await?;
         assert_eq!(message, &buf[..]);
         Ok(())
-    }
-
-    #[test]
-    fn test_v1_header_creation() {
-        let header_bytes = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\n".as_bytes();
-        let other_header_bytes = create_proxy_header_v1(
-            "192.168.0.1:56324".parse().unwrap(),
-            "192.168.0.11:443".parse().unwrap(),
-        );
-        assert_eq!(header_bytes, &other_header_bytes[..]);
     }
 }

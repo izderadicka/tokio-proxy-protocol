@@ -1,19 +1,19 @@
 use crate::error::{Error, Result};
-use bytes::Buf;
+use bytes::{Buf, BufMut, BytesMut};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio_util::codec::{Decoder, Encoder};
 
 pub const MAX_HEADER_SIZE: usize = 536;
 pub const MIN_HEADER_SIZE: usize = 15;
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum SocketType {
     Ipv4,
     Ipv6,
     Unknown,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ProxyInfo {
     pub socket_type: SocketType,
     pub original_source: Option<SocketAddr>,
@@ -51,7 +51,7 @@ impl Decoder for ProxyProtocolCodecV1 {
     type Item = ProxyInfo;
     type Error = Error;
 
-    fn decode(&mut self, buf: &mut bytes::BytesMut) -> Result<Option<Self::Item>> {
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>> {
         if let Some(eol_pos) = buf[self.next_pos..].windows(2).position(|w| w == b"\r\n") {
             let eol_pos = eol_pos + self.next_pos;
             let header = std::str::from_utf8(&buf[..eol_pos])?;
@@ -96,6 +96,44 @@ impl Decoder for ProxyProtocolCodecV1 {
         } else {
             Err(Error::Proxy("Proxy header v1 does not contain EOL".into()))
         }
+    }
+}
+
+impl Encoder<ProxyInfo> for ProxyProtocolCodecV1 {
+    type Error = Error;
+    fn encode(&mut self, item: ProxyInfo, header: &mut BytesMut) -> Result<()> {
+        header.put(&b"PROXY "[..]);
+
+        let proto = match item {
+            ProxyInfo {
+                socket_type: SocketType::Ipv4,
+                ..
+            } => "TCP4",
+            ProxyInfo {
+                socket_type: SocketType::Ipv6,
+                ..
+            } => "TCP6",
+            ProxyInfo {
+                socket_type: SocketType::Unknown,
+                ..
+            } => {
+                header.put(&b"UNKNOWN\r\n"[..]);
+                return Ok(());
+            }
+        };
+        header.put(
+            format!(
+                "{} {} {} {} {}\r\n",
+                proto,
+                item.original_source.expect("IP missing").ip(),
+                item.original_destination.expect("IP missing").ip(),
+                item.original_source.expect("Port missing").port(),
+                item.original_destination.expect("Port missing").port()
+            )
+            .as_bytes(),
+        );
+
+        Ok(())
     }
 }
 
@@ -150,5 +188,21 @@ mod tests {
         let mut d = ProxyProtocolCodecV1::new();
         let r = d.decode(&mut buf);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_v1_header_creation() {
+        let header_bytes = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\n".as_bytes();
+        let header_info = ProxyInfo {
+            socket_type: SocketType::Ipv4,
+            original_source: "192.168.0.1:56324".parse().ok(),
+            original_destination: "192.168.0.11:443".parse().ok(),
+        };
+
+        let mut buf = BytesMut::new();
+        let mut e = ProxyProtocolCodecV1::new();
+        e.encode(header_info, &mut buf).unwrap();
+
+        assert_eq!(header_bytes, &buf[..]);
     }
 }
