@@ -6,12 +6,14 @@ use tokio_util::codec::{Decoder, Encoder};
 pub const MAX_HEADER_SIZE: usize = 536;
 pub const MIN_HEADER_SIZE: usize = 15;
 
+#[derive(PartialEq, Eq, Debug)]
 pub enum SocketType {
     Ipv4,
     Ipv6,
     Unknown,
 }
 
+#[derive(PartialEq, Eq, Debug)]
 pub struct ProxyInfo {
     pub socket_type: SocketType,
     pub original_source: Option<SocketAddr>,
@@ -100,4 +102,53 @@ impl Decoder for ProxyProtocolCodecV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::{BufMut, BytesMut};
+
+    #[test]
+    fn test_header_v1_in_small_pieces() {
+        let data = [
+            "PROX",
+            "Y TCP4",
+            " 192.168",
+            ".0.1 ",
+            "19",
+            "2.168.0.1",
+            "1 563",
+            "24 443\r",
+            "\nUsak",
+        ];
+        let data: Vec<_> = data.iter().map(|s| s.as_bytes()).collect();
+        let mut d = ProxyProtocolCodecV1::new();
+        let mut buf = BytesMut::new();
+        for &piece in &data[..data.len() - 1] {
+            buf.put(piece);
+            let r = d.decode(&mut buf).unwrap();
+            assert!(r.is_none())
+        }
+        // put there last piece
+
+        buf.put(*data.last().unwrap());
+        let r = d
+            .decode(&mut buf)
+            .expect("Buffer should should be ok")
+            .expect("and contain full header");
+        assert_eq!(
+            "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
+            r.original_source.unwrap()
+        );
+        assert_eq!(
+            "192.168.0.11:443".parse::<SocketAddr>().unwrap(),
+            r.original_destination.unwrap()
+        );
+        assert_eq!(b"Usak", &buf[..]);
+    }
+
+    #[test]
+    fn test_long_v1_header_without_eol() {
+        let data = (b'a'..b'z').cycle().take(600).collect::<Vec<_>>();
+        let mut buf = BytesMut::from(&data[..]);
+        let mut d = ProxyProtocolCodecV1::new();
+        let r = d.decode(&mut buf);
+        assert!(r.is_err());
+    }
 }

@@ -354,6 +354,31 @@ mod tests {
         assert!(ps.is_err());
     }
 
+    #[tokio::test]
+    async fn test_too_short_message_fail() {
+        env_logger::try_init().ok();
+        let message = b"NIC\r\n";
+        let ps = Builder::new()
+            .require_proxy_header(true)
+            .wrap(&message[..])
+            .await;
+        assert!(ps.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_too_short_message_pass() -> Result<()> {
+        env_logger::try_init().ok();
+        let message = b"NIC\r\n";
+        let mut ps = Builder::new()
+            .require_proxy_header(false)
+            .wrap(&message[..])
+            .await?;
+        let mut buf = Vec::new();
+        ps.read_to_end(&mut buf).await?;
+        assert_eq!(message, &buf[..]);
+        Ok(())
+    }
+
     #[test]
     fn test_v1_header_creation() {
         let header_bytes = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\n".as_bytes();
