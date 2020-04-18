@@ -20,6 +20,19 @@ pub mod proxy;
 const V1_TAG: &[u8] = b"PROXY ";
 const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
+pub trait WithProxyInfo {
+    fn original_peer_addr(&self) -> Option<SocketAddr> {
+        // TODO: or original_source_addr - which one is better?
+        None
+    }
+
+    fn original_destination_addr(&self) -> Option<SocketAddr> {
+        None
+    }
+}
+
+impl WithProxyInfo for TcpStream {}
+
 pub struct Builder {
     pass_proxy_header: bool,
     require_proxy_header: bool,
@@ -145,12 +158,41 @@ impl<T> ProxiedStream<T> {
     fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
         self.project().inner
     }
+}
 
-    pub fn original_peer_addr(&self) -> Option<SocketAddr> {
+impl<T> AsRef<T> for ProxiedStream<T> {
+    fn as_ref(&self) -> &T {
+        &self.inner
+    }
+}
+
+// with Deref and Deref mut we can get automatic coercion for TcpStream methods
+
+impl std::ops::Deref for ProxiedStream<TcpStream> {
+    type Target = TcpStream;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for ProxiedStream<TcpStream> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T> AsMut<T> for ProxiedStream<T> {
+    fn as_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T> WithProxyInfo for ProxiedStream<T> {
+    fn original_peer_addr(&self) -> Option<SocketAddr> {
         self.orig_source
     }
 
-    pub fn original_destination_addr(&self) -> Option<SocketAddr> {
+    fn original_destination_addr(&self) -> Option<SocketAddr> {
         self.orig_destination
     }
 }
