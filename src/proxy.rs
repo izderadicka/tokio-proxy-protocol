@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, BytesMut};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::str::FromStr;
 use tokio_util::codec::{Decoder, Encoder};
 
 pub const MAX_HEADER_SIZE: usize = 536;
@@ -64,6 +65,24 @@ impl Decoder for ProxyProtocolCodecV1 {
             if parts.len() < 2 {
                 return Err(Error::Proxy("At least two parts are needed".into()));
             }
+
+            fn parse_addresses<T>(parts: &[&str]) -> Result<(SocketAddr, SocketAddr)>
+            where
+                T: FromStr,
+                std::net::IpAddr: From<T>,
+                Error: From<<T as FromStr>::Err>,
+            {
+                let orig_sender_addr: T = parts[2].parse()?;
+                let orig_sender_port: u16 = parts[4].parse::<u16>()?;
+                let orig_recipient_addr: T = parts[3].parse()?;
+                let orig_recipient_port: u16 = parts[5].parse::<u16>()?;
+
+                Ok((
+                    (orig_sender_addr, orig_sender_port).into(),
+                    (orig_recipient_addr, orig_recipient_port).into(),
+                ))
+            }
+
             let res = match parts[1] {
                 "UNKNOWN" => Ok(Some(ProxyInfo {
                     socket_type: SocketType::Unknown,
@@ -71,20 +90,29 @@ impl Decoder for ProxyProtocolCodecV1 {
                     original_destination: None,
                 })),
                 "TCP4" if parts.len() == 6 => {
-                    let orig_sender_addr: Ipv4Addr = parts[2].parse()?;
-                    let orig_sender_port: u16 = parts[4].parse()?;
-                    let orig_recipient_addr: Ipv4Addr = parts[3].parse()?;
-                    let orig_recipient_port: u16 = parts[5].parse()?;
-
+                    let (original_source, original_destination) =
+                        parse_addresses::<Ipv4Addr>(&parts)?;
+                    if !original_source.is_ipv4() && !original_destination.is_ipv4() {
+                        return Err(Error::Proxy("Invalid address version - expected V4".into()));
+                    }
                     Ok(Some(ProxyInfo {
                         socket_type: SocketType::Ipv4,
-                        original_source: Some((orig_sender_addr, orig_sender_port).into()),
-                        original_destination: Some(
-                            (orig_recipient_addr, orig_recipient_port).into(),
-                        ),
+                        original_source: Some(original_source),
+                        original_destination: Some(original_destination),
                     }))
                 }
-                "TCP6" if parts.len() == 6 => unimplemented!(),
+                "TCP6" if parts.len() == 6 => {
+                    let (original_source, original_destination) =
+                        parse_addresses::<Ipv6Addr>(&parts)?;
+                    if !original_source.is_ipv6() && !original_destination.is_ipv6() {
+                        return Err(Error::Proxy("Invalid address version - expected V6".into()));
+                    }
+                    Ok(Some(ProxyInfo {
+                        socket_type: SocketType::Ipv6,
+                        original_source: Some(original_source),
+                        original_destination: Some(original_destination),
+                    }))
+                }
                 _ => Err(Error::Proxy(format!("Invalid proxy header v1: {}", header))),
             };
 
@@ -173,6 +201,7 @@ mod tests {
             .decode(&mut buf)
             .expect("Buffer should should be ok")
             .expect("and contain full header");
+        assert_eq!(SocketType::Ipv4, r.socket_type);
         assert_eq!(
             "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
             r.original_source.unwrap()
@@ -191,6 +220,14 @@ mod tests {
         let mut d = ProxyProtocolCodecV1::new();
         let r = d.decode(&mut buf);
         assert!(r.is_err());
+        if let Err(Error::Proxy(m)) = r {
+            assert!(
+                m.contains("does not contain EOL"),
+                "error is  about missing EOL"
+            )
+        } else {
+            panic!("Wrong error")
+        }
     }
 
     #[test]
@@ -207,5 +244,47 @@ mod tests {
         e.encode(header_info, &mut buf).unwrap();
 
         assert_eq!(header_bytes, &buf[..]);
+    }
+
+    #[test]
+    fn test_v1_header_creation_for_ipv6() {
+        let header_bytes = b"PROXY TCP6 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa 65535 65534\r\n";
+        let header_info = ProxyInfo {
+            socket_type: SocketType::Ipv6,
+            original_source: "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+                .parse()
+                .ok(),
+            original_destination: "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa]:65534"
+                .parse()
+                .ok(),
+        };
+
+        let mut buf = BytesMut::new();
+        let mut e = ProxyProtocolCodecV1::new();
+        e.encode(header_info, &mut buf).unwrap();
+
+        assert_eq!(&header_bytes[..], &buf[..]);
+    }
+
+    #[test]
+    fn test_v1_header_decode_tcp6() {
+        let header_bytes = b"PROXY TCP6 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa 65535 65534\r\nHello";
+        let mut d = ProxyProtocolCodecV1::new();
+        let mut buf = BytesMut::new();
+        buf.put(&header_bytes[..]);
+        let header_info = d
+            .decode(&mut buf)
+            .expect("parsed_ok")
+            .expect("contains full header");
+        let original_source: Option<SocketAddr> = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+            .parse()
+            .ok();
+        let original_destination: Option<SocketAddr> =
+            "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa]:65534"
+                .parse()
+                .ok();
+        assert_eq!(SocketType::Ipv6, header_info.socket_type);
+        assert_eq!(original_source, header_info.original_source);
+        assert_eq!(original_destination, header_info.original_destination);
     }
 }
