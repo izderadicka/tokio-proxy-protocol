@@ -47,11 +47,13 @@ impl Builder {
                 break;
             }
         }
-
+        // TODO:  protocol specification speaks that header always must come as whole in first packet
+        //        but could we rely on it also here in tokio? If yes implementation could be easier
         if buf.remaining() < MIN_HEADER_SIZE {
             return if self.require_proxy_header {
                 Err(Error::Proxy("Message too short for proxy protocol".into()))
             } else {
+                info!("No proxy protocol detected (because of too short message),  just passing the stream");
                 Ok(ProxiedStream {
                     inner: stream,
                     buf,
@@ -83,7 +85,7 @@ impl Builder {
             }
         } else if &buf[0..12] == V2_TAG && self.support_v2 {
             debug!("Detected proxy protocol v2 tag");
-            unimplemented!("V2 not yet implemented")
+            unimplemented!("V2 not yet implemented") //TODO: Implement V2 protocol
         } else if self.require_proxy_header {
             error!("Proxy protocol is required");
             Err(Error::Proxy("Proxy protocol is required".into()))
