@@ -36,8 +36,9 @@ async fn process_socket(socket: TcpStream) -> Result<()> {
         }
     }
     debug!("Read {} bytes", count);
+    let msg = format!("Bytes received {}\n", count);
     socket
-        .write(format!("Bytes received {}\n", count).as_bytes())
+        .write(msg.as_bytes())
         .await?;
     debug!("Connection finished");
     Ok(())
