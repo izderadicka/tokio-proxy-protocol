@@ -22,7 +22,7 @@ const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
 pub trait WithProxyInfo {
     fn original_peer_addr(&self) -> Option<SocketAddr> {
-        // TODO: or original_source_addr - which one is better?
+        // TODO: name it or original_source_addr - which one is better?
         None
     }
 
@@ -44,7 +44,7 @@ impl Default for Builder {
     fn default() -> Self {
         Builder {
             pass_proxy_header: false,
-            require_proxy_header: false,
+            require_proxy_header: true,
             support_v1: true,
             support_v2: true,
         }
@@ -52,71 +52,24 @@ impl Default for Builder {
 }
 
 impl Builder {
-    pub async fn wrap<T: AsyncRead>(self, mut stream: T) -> Result<ProxiedStream<T>> {
-        let mut buf = BytesMut::with_capacity(MAX_HEADER_SIZE);
-        while buf.len() < MIN_HEADER_SIZE {
-            let r = stream.read_buf(&mut buf).await?;
-            if r == 0 {
-                break;
-            }
-        }
-        // TODO:  protocol specification speaks that header always must come as whole in first packet
-        //        but could we rely on it also here in tokio? If yes implementation could be easier
-        if buf.remaining() < MIN_HEADER_SIZE {
-            return if self.require_proxy_header {
-                Err(Error::Proxy("Message too short for proxy protocol".into()))
-            } else {
-                info!("No proxy protocol detected (because of too short message),  just passing the stream");
-                Ok(ProxiedStream {
-                    inner: stream,
-                    buf,
-                    orig_source: None,
-                    orig_destination: None,
-                })
-            };
-        }
 
-        debug!("Buffered initial {} bytes", buf.remaining());
-
-        if &buf[0..6] == V1_TAG && self.support_v1 {
-            debug!("Detected proxy protocol v1 tag");
-            let mut codec = ProxyProtocolCodecV1::new_with_pass_header(self.pass_proxy_header);
-            loop {
-                if let Some(proxy_info) = codec.decode(&mut buf)? {
-                    return Ok(ProxiedStream {
-                        inner: stream,
-                        buf,
-                        orig_source: proxy_info.original_source,
-                        orig_destination: proxy_info.original_destination,
-                    });
-                }
-
-                let r = stream.read_buf(&mut buf).await?;
-                if r == 0 {
-                    return Err(Error::Proxy("Incomplete V1 header".into()));
-                }
-            }
-        } else if &buf[0..12] == V2_TAG && self.support_v2 {
-            debug!("Detected proxy protocol v2 tag");
-            unimplemented!("V2 not yet implemented") //TODO: Implement V2 protocol
-        } else if self.require_proxy_header {
-            error!("Proxy protocol is required");
-            Err(Error::Proxy("Proxy protocol is required".into()))
-        } else {
-            info!("No proxy protocol detected, just passing the stream");
-            Ok(ProxiedStream {
-                inner: stream,
-                buf,
-                orig_source: None,
-                orig_destination: None,
-            })
+    pub fn build<T:AsyncRead>(self, stream: T) -> ProxyStream<T> {
+        ProxyStream {
+            inner:stream,
+            buf: BytesMut::with_capacity(MAX_HEADER_SIZE),
+            orig_destination: None,
+            orig_source: None,
+            pass_proxy_header: self.pass_proxy_header,
+            require_proxy_header: self.require_proxy_header,
+            support_v1: self.support_v1,
+            support_v2: self.support_v2
         }
     }
-
-    pub async fn connect(self, addr: SocketAddr) -> Result<ProxiedStream<TcpStream>> {
-        let stream = TcpStream::connect(addr).await?;
-        self.wrap(stream).await
-    }
+    
+    // pub async fn connect(self, addr: SocketAddr) -> Result<ProxyStream<TcpStream>> {
+    //     let stream = TcpStream::connect(addr).await?;
+    //     self.wrap(stream).await
+    // }
 
     pub fn new() -> Self {
         Builder::default()
@@ -146,21 +99,26 @@ impl Builder {
 }
 
 #[pin_project]
-pub struct ProxiedStream<T> {
+pub struct ProxyStream<T> {
     #[pin]
     inner: T,
     buf: BytesMut,
     orig_source: Option<SocketAddr>,
     orig_destination: Option<SocketAddr>,
+    pass_proxy_header: bool,
+    require_proxy_header: bool,
+    support_v1: bool,
+    support_v2: bool,
+
 }
 
-impl<T> ProxiedStream<T> {
+impl<T> ProxyStream<T> {
     fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut T> {
         self.project().inner
     }
 }
 
-impl<T> AsRef<T> for ProxiedStream<T> {
+impl<T> AsRef<T> for ProxyStream<T> {
     fn as_ref(&self) -> &T {
         &self.inner
     }
@@ -168,26 +126,26 @@ impl<T> AsRef<T> for ProxiedStream<T> {
 
 // with Deref and Deref mut we can get automatic coercion for TcpStream methods
 
-impl std::ops::Deref for ProxiedStream<TcpStream> {
+impl std::ops::Deref for ProxyStream<TcpStream> {
     type Target = TcpStream;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl std::ops::DerefMut for ProxiedStream<TcpStream> {
+impl std::ops::DerefMut for ProxyStream<TcpStream> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<T> AsMut<T> for ProxiedStream<T> {
+impl<T> AsMut<T> for ProxyStream<T> {
     fn as_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 }
 
-impl<T> WithProxyInfo for ProxiedStream<T> {
+impl<T> WithProxyInfo for ProxyStream<T> {
     fn original_peer_addr(&self) -> Option<SocketAddr> {
         self.orig_source
     }
@@ -197,13 +155,61 @@ impl<T> WithProxyInfo for ProxiedStream<T> {
     }
 }
 
-impl<T: AsyncRead> ProxiedStream<T> {
-    pub async fn new(stream: T) -> Result<Self> {
-        Builder::default().wrap(stream).await
+impl<T: AsyncRead> ProxyStream<T> {
+
+    pub async fn accept(&mut self) -> Result<()> {
+        
+        while self.buf.len() < MIN_HEADER_SIZE {
+            let r = self.inner.read_buf(&mut self.buf).await?;
+            if r == 0 {
+                break;
+            }
+        }
+
+        if self.buf.remaining() < MIN_HEADER_SIZE {
+            return if self.require_proxy_header {
+                Err(Error::Proxy("Message too short for proxy protocol".into()))
+            } else {
+                info!("No proxy protocol detected (because of too short message),  just passing the stream");
+                Ok(())
+            };
+        }
+
+        debug!("Buffered initial {} bytes", self.buf.remaining());
+
+        if &self.buf[0..6] == V1_TAG && self.support_v1 {
+            debug!("Detected proxy protocol v1 tag");
+            let mut codec = ProxyProtocolCodecV1::new_with_pass_header(self.pass_proxy_header);
+            loop {
+                if let Some(proxy_info) = codec.decode(&mut self.buf)? {
+                    self.orig_source = proxy_info.original_source;
+                    self.orig_destination = proxy_info.original_destination;
+                    return Ok(());
+                }
+
+                let r = self.inner.read_buf(&mut self.buf).await?;
+                if r == 0 {
+                    return Err(Error::Proxy("Incomplete V1 header".into()));
+                }
+            }
+        } else if &self.buf[0..12] == V2_TAG && self.support_v2 {
+            debug!("Detected proxy protocol v2 tag");
+            unimplemented!("V2 not yet implemented") //TODO: Implement V2 protocol
+        } else if self.require_proxy_header {
+            error!("Proxy protocol is required");
+            Err(Error::Proxy("Proxy protocol is required".into()))
+        } else {
+            info!("No proxy protocol detected, just passing the stream");
+            Ok(())
+        }
+    }
+
+    pub fn new(stream: T) -> Self {
+        Builder::default().build(stream)
     }
 }
 
-impl<T: AsyncRead> AsyncRead for ProxiedStream<T> {
+impl<T: AsyncRead> AsyncRead for ProxyStream<T> {
     fn poll_read(
         self: Pin<&mut Self>,
         ctx: &mut Context,
@@ -233,7 +239,7 @@ impl<T: AsyncRead> AsyncRead for ProxiedStream<T> {
     }
 }
 
-impl<T: AsyncWrite + Unpin> ProxiedStream<T> {
+impl<T: AsyncWrite + Unpin> ProxyStream<T> {
     pub async fn send_proxy_header_v1(&mut self, item: ProxyInfo) -> Result<()> {
         let mut data = BytesMut::new();
         ProxyProtocolCodecV1::new().encode(item, &mut data)?;
@@ -242,7 +248,7 @@ impl<T: AsyncWrite + Unpin> ProxiedStream<T> {
     }
 }
 
-impl<R: AsyncRead + AsyncWrite> AsyncWrite for ProxiedStream<R> {
+impl<R: AsyncRead + AsyncWrite> AsyncWrite for ProxyStream<R> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -269,7 +275,8 @@ mod tests {
     async fn test_v1_tcp4() -> Result<()> {
         env_logger::try_init().ok();
         let message = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHELLO".as_bytes();
-        let mut ps = Builder::new().wrap(message).await?;
+        let mut ps = Builder::new().build(message);
+        ps.accept().await?;
         assert_eq!(
             "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
             ps.original_peer_addr().unwrap()
@@ -288,7 +295,8 @@ mod tests {
     async fn test_v1_header_pass() -> Result<()> {
         env_logger::try_init().ok();
         let message = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHELLO".as_bytes();
-        let mut ps = Builder::new().pass_proxy_header(true).wrap(message).await?;
+        let mut ps = Builder::new().pass_proxy_header(true).build(message);
+        ps.accept().await?;
         assert_eq!(
             "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
             ps.original_peer_addr().unwrap()
@@ -311,7 +319,8 @@ mod tests {
         let data = (b'A'..=b'Z').cycle().take(DATA_LENGTH).map(|c| c as char);
         message.extend(data);
 
-        let mut ps = ProxiedStream::new(message.as_bytes()).await?;
+        let mut ps = ProxyStream::new(message.as_bytes());
+        ps.accept().await?;
         assert!(ps.original_peer_addr().is_none());
         assert!(ps.original_destination_addr().is_none());
         let mut buf = Vec::new();
@@ -323,8 +332,9 @@ mod tests {
     #[tokio::test]
     async fn test_no_proxy_header_passed() -> Result<()> {
         env_logger::try_init().ok();
-        let message = b"MEMAM PROXY HEADER, CHUDACEK JA";
-        let mut ps = ProxiedStream::new(&message[..]).await?;
+        let message: &[u8] = b"MEMAM PROXY HEADER, CHUDACEK JA";
+        let mut ps = Builder::new().require_proxy_header(false).build(message);
+        ps.accept().await?;
         assert!(ps.original_peer_addr().is_none());
         assert!(ps.original_destination_addr().is_none());
         let mut buf = Vec::new();
@@ -337,22 +347,20 @@ mod tests {
     async fn test_no_proxy_header_rejected() {
         env_logger::try_init().ok();
         let message = b"MEMAM PROXY HEADER, CHUDACEK JA";
-        let ps = Builder::new()
+        let mut ps = Builder::new()
             .require_proxy_header(true)
-            .wrap(&message[..])
-            .await;
-        assert!(ps.is_err());
+            .build(&message[..]);
+        assert!(ps.accept().await.is_err());
     }
 
     #[tokio::test]
     async fn test_too_short_message_fail() {
         env_logger::try_init().ok();
         let message = b"NIC\r\n";
-        let ps = Builder::new()
+        let mut ps = Builder::new()
             .require_proxy_header(true)
-            .wrap(&message[..])
-            .await;
-        assert!(ps.is_err());
+            .build(&message[..]);
+        assert!(ps.accept().await.is_err());
     }
 
     #[tokio::test]
@@ -361,8 +369,8 @@ mod tests {
         let message = b"NIC\r\n";
         let mut ps = Builder::new()
             .require_proxy_header(false)
-            .wrap(&message[..])
-            .await?;
+            .build(&message[..]);
+        ps.accept().await?;
         let mut buf = Vec::new();
         ps.read_to_end(&mut buf).await?;
         assert_eq!(message, &buf[..]);

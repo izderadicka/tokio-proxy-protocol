@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate log;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, Error};
 use futures::future::TryFutureExt;
 use structopt::StructOpt;
 use tokio::{
@@ -9,7 +9,7 @@ use tokio::{
     prelude::*,
     stream::StreamExt,
 };
-use tokio_proxy_protocol::{Builder, WithProxyInfo};
+use tokio_proxy_protocol::{ProxyStream, WithProxyInfo};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
@@ -19,8 +19,7 @@ struct Args {
     listen: std::net::SocketAddr,
 }
 
-async fn process_socket(socket: TcpStream) -> Result<()> {
-    let mut socket = Builder::new().wrap(socket).await?;
+async fn process_proxy_socket(mut socket: ProxyStream<TcpStream>) -> Result<()> {
     debug!("Got connection from {:?}", socket.peer_addr()); // here deref coercion works for us - we can use TcpStream methods
     debug!(
         "Original proxied connection was from {:?} to {:?}",
@@ -57,9 +56,13 @@ async fn main() -> Result<()> {
     while let Some(socket) = server.next().await {
         match socket {
             Ok(socket) => {
-                tokio::spawn(
-                    process_socket(socket)
-                        .map_err(|e| error!("Error while processing socket {}", e)),
+                tokio::spawn( async {
+                    let mut socket = ProxyStream::<TcpStream>::new(socket);
+                    socket.accept().await?;
+                    process_proxy_socket(socket).await?;
+                    Ok::<_, Error>(())
+                       
+                }.map_err(|e| error!("Error processing socket {}", e))
                 );
             }
             Err(e) => error!("Error accepting socket: {}", e),
