@@ -20,7 +20,7 @@ struct Args {
 }
 
 async fn process_socket(socket: TcpStream) -> Result<()> {
-    let mut socket = Builder::new().wrap(socket).await?;
+    let mut socket = Builder::new().accept(socket).await?;
     debug!("Got connection from {:?}", socket.peer_addr()); // here deref coercion works for us - we can use TcpStream methods
     debug!(
         "Original proxied connection was from {:?} to {:?}",
@@ -37,9 +37,7 @@ async fn process_socket(socket: TcpStream) -> Result<()> {
     }
     debug!("Read {} bytes", count);
     let msg = format!("Bytes received {}\n", count);
-    socket
-        .write(msg.as_bytes())
-        .await?;
+    socket.write(msg.as_bytes()).await?;
     debug!("Connection finished");
     Ok(())
 }

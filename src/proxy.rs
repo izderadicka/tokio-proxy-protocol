@@ -1,5 +1,6 @@
 use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, BytesMut};
+use std::convert::TryFrom;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use tokio_util::codec::{Decoder, Encoder};
@@ -8,20 +9,49 @@ pub const MAX_HEADER_SIZE: usize = 536;
 pub const MIN_HEADER_SIZE: usize = 15;
 
 #[derive(PartialEq, Eq, Debug, Clone)]
-pub enum SocketType {
+pub(crate) enum SocketType {
     Ipv4,
     Ipv6,
     Unknown,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
-pub struct ProxyInfo {
+pub(crate) struct ProxyInfo {
     pub socket_type: SocketType,
     pub original_source: Option<SocketAddr>,
     pub original_destination: Option<SocketAddr>,
 }
 
-pub struct ProxyProtocolCodecV1 {
+impl TryFrom<(Option<SocketAddr>, Option<SocketAddr>)> for ProxyInfo {
+    type Error = Error;
+    fn try_from(addrs: (Option<SocketAddr>, Option<SocketAddr>)) -> Result<Self> {
+        match (addrs.0, addrs.1) {
+            (s @ Some(SocketAddr::V4(_)), d @ Some(SocketAddr::V4(_))) => Ok(ProxyInfo {
+                socket_type: SocketType::Ipv4,
+                original_source: s,
+                original_destination: d,
+            }),
+
+            (s @ Some(SocketAddr::V6(_)), d @ Some(SocketAddr::V6(_))) => Ok(ProxyInfo {
+                socket_type: SocketType::Ipv6,
+                original_source: s,
+                original_destination: d,
+            }),
+
+            (None, None) => Ok(ProxyInfo {
+                socket_type: SocketType::Unknown,
+                original_source: None,
+                original_destination: None,
+            }),
+
+            _ => Err(Error::Proxy(
+                "Inconsistent source and destination addresses".into(),
+            )),
+        }
+    }
+}
+
+pub(crate) struct ProxyProtocolCodecV1 {
     next_pos: usize,
     pass_header: bool,
 }
@@ -48,6 +78,23 @@ impl ProxyProtocolCodecV1 {
     }
 }
 
+fn parse_addresses<T>(parts: &[&str]) -> Result<(SocketAddr, SocketAddr)>
+where
+    T: FromStr,
+    std::net::IpAddr: From<T>,
+    Error: From<<T as FromStr>::Err>,
+{
+    let orig_sender_addr: T = parts[2].parse()?;
+    let orig_sender_port: u16 = parts[4].parse::<u16>()?;
+    let orig_recipient_addr: T = parts[3].parse()?;
+    let orig_recipient_port: u16 = parts[5].parse::<u16>()?;
+
+    Ok((
+        (orig_sender_addr, orig_sender_port).into(),
+        (orig_recipient_addr, orig_recipient_port).into(),
+    ))
+}
+
 impl Decoder for ProxyProtocolCodecV1 {
     type Item = ProxyInfo;
     type Error = Error;
@@ -64,23 +111,6 @@ impl Decoder for ProxyProtocolCodecV1 {
             }
             if parts.len() < 2 {
                 return Err(Error::Proxy("At least two parts are needed".into()));
-            }
-
-            fn parse_addresses<T>(parts: &[&str]) -> Result<(SocketAddr, SocketAddr)>
-            where
-                T: FromStr,
-                std::net::IpAddr: From<T>,
-                Error: From<<T as FromStr>::Err>,
-            {
-                let orig_sender_addr: T = parts[2].parse()?;
-                let orig_sender_port: u16 = parts[4].parse::<u16>()?;
-                let orig_recipient_addr: T = parts[3].parse()?;
-                let orig_recipient_port: u16 = parts[5].parse::<u16>()?;
-
-                Ok((
-                    (orig_sender_addr, orig_sender_port).into(),
-                    (orig_recipient_addr, orig_recipient_port).into(),
-                ))
             }
 
             let res = match parts[1] {
