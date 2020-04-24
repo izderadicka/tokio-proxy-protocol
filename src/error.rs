@@ -16,6 +16,9 @@ pub enum Error {
 
     #[error("Invalid port in proxy header: {0}")]
     Port(#[from] std::num::ParseIntError),
+
+    #[error("Invalid state: {0}")]
+    InvalidState(String)
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -187,8 +187,15 @@ impl<T> ProxyStream<T> {
         self.project().inner
     }
 
-    pub fn into_inner(self) -> T {
-        self.inner
+    /// Returns inner stream, but
+    /// only when it is save, e.g. no data in buffer
+    pub fn try_into_inner(self) -> Result<T> {
+        if self.buf.is_empty() {
+            Ok(self.inner)
+        } else {
+            Err(Error::InvalidState("Cannot return inner steam because buffer is not empty".into()))
+        }
+        
     }
 }
 
@@ -198,7 +205,7 @@ impl<T> AsRef<T> for ProxyStream<T> {
     }
 }
 
-// with Deref and Deref mut we can get automatic coercion for TcpStream methods
+// with Deref we can get automatic coercion for some TcpStream methods
 
 impl std::ops::Deref for ProxyStream<TcpStream> {
     type Target = TcpStream;
@@ -207,17 +214,20 @@ impl std::ops::Deref for ProxyStream<TcpStream> {
     }
 }
 
-impl std::ops::DerefMut for ProxyStream<TcpStream> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
+// actually DerefMut mut can be quite dangerous, because it'll enable to inner stream, while some data are already in buffer
+// impl std::ops::DerefMut for ProxyStream<TcpStream> {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.inner
+//     }
+// }
 
-impl<T> AsMut<T> for ProxyStream<T> {
-    fn as_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-}
+
+// same for AsMut - try to not to use it
+// impl<T> AsMut<T> for ProxyStream<T> {
+//     fn as_mut(&mut self) -> &mut T {
+//         &mut self.inner
+//     }
+// }
 
 impl<T> WithProxyInfo for ProxyStream<T> {
     fn original_peer_addr(&self) -> Option<SocketAddr> {
@@ -425,7 +435,7 @@ mod tests {
             _: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<io::Result<usize>> {
-            Poll::Ready((self.get_mut() as &mut dyn io::Write).write(buf))
+            Poll::Ready(io::Write::write(self.get_mut(),buf))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {

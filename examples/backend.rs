@@ -15,7 +15,7 @@ use tokio_proxy_protocol::{Builder, WithProxyInfo};
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
 struct Args {
     // TCP Socket to listen on - addr:port
-    #[structopt(short, long, default_value = "127.0.0.1:7776")]
+    #[structopt(short, long, default_value = "127.0.0.1:7775")]
     listen: std::net::SocketAddr,
 }
 
