@@ -1,3 +1,7 @@
+//! Implements  [PROXY protocol](http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) in tokio
+//! 
+//! TODO: currently only v1 is implemented
+
 #[macro_use]
 extern crate log;
 
@@ -9,6 +13,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::net::{TcpStream, ToSocketAddrs};
+
 use tokio::prelude::*;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -16,17 +21,25 @@ use error::{Error, Result};
 use proxy::{ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
 
 pub mod error;
-pub mod proxy;
+pub(crate) mod proxy;
 
 const V1_TAG: &[u8] = b"PROXY ";
 const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
+
+/// Information from proxy protocol are provided through `WithProxyInfo` trait,
+/// which provides original addresses from PROXY protocol
+/// 
+/// For compatibility it's also implemented for `tokio::net::TcpSteam`, where it returns `None`
 pub trait WithProxyInfo {
+    // TODO: or original_source_addr - which one is better?
+    /// Returns address of original source of the connection (client)
     fn original_peer_addr(&self) -> Option<SocketAddr> {
-        // TODO: or original_source_addr - which one is better?
+        
         None
     }
 
+    /// Returns address of original destination of the connection (e.g. first proxy)
     fn original_destination_addr(&self) -> Option<SocketAddr> {
         None
     }
@@ -34,6 +47,7 @@ pub trait WithProxyInfo {
 
 impl WithProxyInfo for TcpStream {}
 
+/// Struct to accept stream with PROXY header and extract information from it
 pub struct Acceptor {
     pass_proxy_header: bool,
     require_proxy_header: bool,
@@ -53,8 +67,9 @@ impl Default for Acceptor {
 }
 
 impl Acceptor {
-    /// Processes proxy protocol header and creates ProxyStream
-    /// with appropriate information
+
+    /// Processes proxy protocol header and creates [`ProxyStream`]
+    /// with appropriate information in it
     pub async fn accept<T: AsyncRead>(self, mut stream: T) -> Result<ProxyStream<T>> {
         let mut buf = BytesMut::with_capacity(MAX_HEADER_SIZE);
         while buf.len() < MIN_HEADER_SIZE {
@@ -115,10 +130,14 @@ impl Acceptor {
         }
     }
 
+    /// Creates new default `Acceptor`
     pub fn new() -> Self {
         Acceptor::default()
     }
 
+    /// If true accepted connection will pass the PROXY header, so it can be read from [`ProxyStream`].
+    /// Default is false, which is normal behavior - PROXY header is consumed and stream starts 
+    /// with further data
     pub fn pass_proxy_header(self, pass_proxy_header: bool) -> Self {
         Acceptor {
             pass_proxy_header,
@@ -126,6 +145,9 @@ impl Acceptor {
         }
     }
 
+    /// If true (default) PROXY header is required in accepted stream, if not present error is raised.
+    /// If set to false, then if PROXY header is not present, stream is created and all data passed on.
+    /// Original addresses then are not known indeed.
     pub fn require_proxy_header(self, require_proxy_header: bool) -> Self {
         Acceptor {
             require_proxy_header,

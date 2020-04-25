@@ -1,9 +1,11 @@
 tokio-proxy-protocol
 ====================
 
-POC for [proxy protocol](http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) for tokio
+[proxy protocol](http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) for tokio
 
-Experimental only - do not use!
+Only v1 of protocol is implemented.
+
+**WARNING**: Alpha quality code
 
 How to test with HAProxy
 ------------------------
@@ -19,12 +21,23 @@ listen  my-test
 
 and restart haproxy
 
-run 
+In `examples` there are two programs `backend` and `proxy`. `proxy` is an example of another proxy behind HAProxy, it reads PROXY header, logs information about original addresses and then passes this info to downstream connection to `backend`, which can then see the original address passed by HAProxy - so setup is:
+
 ```
-RUST_LOG=debug cargo run --example server
+[client] <--> [HAProxy] <--> [proxy] <--> [backend]
+```
+Run them both in separate terminals
+
+```
+RUST_LOG=debug cargo run --example backend
 ```
 
-send data to server
+```
+RUST_LOG=debug cargo run --example proxy
+```
+
+send data to server with `netcat`
+
 ```
 cat some_file | nc -N localhost 7777
 ```
