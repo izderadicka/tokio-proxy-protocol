@@ -9,7 +9,7 @@ use tokio::{
     prelude::*,
     stream::StreamExt,
 };
-use tokio_proxy_protocol::{Builder, WithProxyInfo};
+use tokio_proxy_protocol::{Acceptor, WithProxyInfo};
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example", about = "An example of StructOpt usage.")]
@@ -20,7 +20,7 @@ struct Args {
 }
 
 async fn process_socket(socket: TcpStream) -> Result<()> {
-    let mut socket = Builder::new().accept(socket).await?;
+    let mut socket = Acceptor::new().accept(socket).await?;
     debug!("Got connection from {:?}", socket.peer_addr()); // here deref coercion works for us - we can use TcpStream methods
     debug!(
         "Original proxied connection was from {:?} to {:?}",
@@ -30,6 +30,7 @@ async fn process_socket(socket: TcpStream) -> Result<()> {
     let mut buf = [0u8; 1024];
     let mut count = 0;
     while let Ok(n) = socket.read(&mut buf).await {
+        debug!("Got {} bytes", n);
         count += n;
         if n == 0 {
             break;

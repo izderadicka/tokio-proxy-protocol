@@ -34,16 +34,16 @@ pub trait WithProxyInfo {
 
 impl WithProxyInfo for TcpStream {}
 
-pub struct Builder {
+pub struct Acceptor {
     pass_proxy_header: bool,
     require_proxy_header: bool,
     support_v1: bool,
     support_v2: bool,
 }
 
-impl Default for Builder {
+impl Default for Acceptor {
     fn default() -> Self {
-        Builder {
+        Acceptor {
             pass_proxy_header: false,
             require_proxy_header: false,
             support_v1: true,
@@ -52,7 +52,7 @@ impl Default for Builder {
     }
 }
 
-impl Builder {
+impl Acceptor {
     /// Processes proxy protocol header and creates ProxyStream
     /// with appropriate information
     pub async fn accept<T: AsyncRead>(self, mut stream: T) -> Result<ProxyStream<T>> {
@@ -115,6 +115,52 @@ impl Builder {
         }
     }
 
+    pub fn new() -> Self {
+        Acceptor::default()
+    }
+
+    pub fn pass_proxy_header(self, pass_proxy_header: bool) -> Self {
+        Acceptor {
+            pass_proxy_header,
+            ..self
+        }
+    }
+
+    pub fn require_proxy_header(self, require_proxy_header: bool) -> Self {
+        Acceptor {
+            require_proxy_header,
+            ..self
+        }
+    }
+
+    pub fn support_v1(self, support_v1: bool) -> Self {
+        Acceptor { support_v1, ..self }
+    }
+
+    pub fn support_v2(self, support_v2: bool) -> Self {
+        Acceptor { support_v2, ..self }
+    }
+}
+
+pub struct Connector {
+    use_v2: bool,
+}
+
+impl Default for Connector {
+    fn default() -> Self {
+        Connector { use_v2: false }
+    }
+}
+
+impl Connector {
+    pub fn new() -> Self {
+        Connector::default()
+    }
+
+    pub fn use_v2(self, use_v2: bool) -> Self {
+        Connector { use_v2 }
+    }
+
     /// Creates outgoing connection with appropriate proxy protocol header
     pub async fn connect<A: ToSocketAddrs>(
         &self,
@@ -135,41 +181,13 @@ impl Builder {
     ) -> Result<T> {
         let proxy_info = (original_source, original_destination).try_into()?;
         let mut data = BytesMut::new();
-        if self.support_v1 {
+        if !self.use_v2 {
             ProxyProtocolCodecV1::new().encode(proxy_info, &mut data)?;
-        } else if self.support_v2 {
-            unimplemented!("V2 Protocol is not implemented")
         } else {
-            return Err(Error::Proxy("No proxy protocol is supported".into()));
+            unimplemented!("V2 Protocol is not implemented")
         }
         dest.write(&data).await?;
         Ok(dest)
-    }
-
-    pub fn new() -> Self {
-        Builder::default()
-    }
-
-    pub fn pass_proxy_header(self, pass_proxy_header: bool) -> Self {
-        Builder {
-            pass_proxy_header,
-            ..self
-        }
-    }
-
-    pub fn require_proxy_header(self, require_proxy_header: bool) -> Self {
-        Builder {
-            require_proxy_header,
-            ..self
-        }
-    }
-
-    pub fn support_v1(self, support_v1: bool) -> Self {
-        Builder { support_v1, ..self }
-    }
-
-    pub fn support_v2(self, support_v2: bool) -> Self {
-        Builder { support_v2, ..self }
     }
 }
 
@@ -193,9 +211,10 @@ impl<T> ProxyStream<T> {
         if self.buf.is_empty() {
             Ok(self.inner)
         } else {
-            Err(Error::InvalidState("Cannot return inner steam because buffer is not empty".into()))
+            Err(Error::InvalidState(
+                "Cannot return inner steam because buffer is not empty".into(),
+            ))
         }
-        
     }
 }
 
@@ -221,7 +240,6 @@ impl std::ops::Deref for ProxyStream<TcpStream> {
 //     }
 // }
 
-
 // same for AsMut - try to not to use it
 // impl<T> AsMut<T> for ProxyStream<T> {
 //     fn as_mut(&mut self) -> &mut T {
@@ -241,7 +259,7 @@ impl<T> WithProxyInfo for ProxyStream<T> {
 
 impl<T: AsyncRead> ProxyStream<T> {
     pub async fn new(stream: T) -> Result<Self> {
-        Builder::default().accept(stream).await
+        Acceptor::default().accept(stream).await
     }
 }
 
@@ -302,7 +320,7 @@ mod tests {
     async fn test_v1_tcp4() -> Result<()> {
         env_logger::try_init().ok();
         let message = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHELLO".as_bytes();
-        let mut ps = Builder::new().accept(message).await?;
+        let mut ps = Acceptor::new().accept(message).await?;
         assert_eq!(
             "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
             ps.original_peer_addr().unwrap()
@@ -321,7 +339,7 @@ mod tests {
     async fn test_v1_header_pass() -> Result<()> {
         env_logger::try_init().ok();
         let message = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHELLO".as_bytes();
-        let mut ps = Builder::new()
+        let mut ps = Acceptor::new()
             .pass_proxy_header(true)
             .accept(message)
             .await?;
@@ -373,7 +391,7 @@ mod tests {
     async fn test_no_proxy_header_rejected() {
         env_logger::try_init().ok();
         let message = b"MEMAM PROXY HEADER, CHUDACEK JA";
-        let ps = Builder::new()
+        let ps = Acceptor::new()
             .require_proxy_header(true)
             .accept(&message[..])
             .await;
@@ -384,7 +402,7 @@ mod tests {
     async fn test_too_short_message_fail() {
         env_logger::try_init().ok();
         let message = b"NIC\r\n";
-        let ps = Builder::new()
+        let ps = Acceptor::new()
             .require_proxy_header(true)
             .accept(&message[..])
             .await;
@@ -395,7 +413,7 @@ mod tests {
     async fn test_too_short_message_pass() -> Result<()> {
         env_logger::try_init().ok();
         let message = b"NIC\r\n";
-        let mut ps = Builder::new()
+        let mut ps = Acceptor::new()
             .require_proxy_header(false)
             .accept(&message[..])
             .await?;
@@ -405,56 +423,14 @@ mod tests {
         Ok(())
     }
 
-    struct TestBuffer {
-        buf: BytesMut,
-    }
-
-    use std::io;
-
-    impl TestBuffer {
-        fn new() -> Self {
-            TestBuffer {
-                buf: BytesMut::new(),
-            }
-        }
-    }
-    impl io::Write for TestBuffer {
-        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-            self.buf.extend(b);
-            Ok(b.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl AsyncWrite for TestBuffer {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            Poll::Ready(io::Write::write(self.get_mut(),buf))
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
     #[tokio::test]
-    async fn test_builder_connect() -> Result<()> {
-        let mut buf = TestBuffer::new();
+    async fn test_connect() -> Result<()> {
+        let mut buf = Vec::new();
         let src = "127.0.0.1:1111".parse().ok();
         let dest = "127.0.0.1:2222".parse().ok();
-        let res = Builder::new().connect_to(&mut buf, src, dest).await?;
+        let _res = Connector::new().connect_to(&mut buf, src, dest).await?;
         let expected = "PROXY TCP4 127.0.0.1 127.0.0.1 1111 2222\r\n";
-        assert_eq!(expected.as_bytes(), &res.buf[..]);
+        assert_eq!(expected.as_bytes(), &buf[..]);
         Ok(())
     }
 }

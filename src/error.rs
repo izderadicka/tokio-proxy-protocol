@@ -18,7 +18,7 @@ pub enum Error {
     Port(#[from] std::num::ParseIntError),
 
     #[error("Invalid state: {0}")]
-    InvalidState(String)
+    InvalidState(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
