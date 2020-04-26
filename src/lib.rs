@@ -1,5 +1,5 @@
 //! Implements  [PROXY protocol](http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt) in tokio
-//! 
+//!
 //! TODO: currently only v1 is implemented
 
 #[macro_use]
@@ -17,25 +17,23 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::prelude::*;
 use tokio_util::codec::{Decoder, Encoder};
 
+use codec::{ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
 use error::{Error, Result};
-use proxy::{ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
 
+pub mod codec;
 pub mod error;
-pub(crate) mod proxy;
 
 const V1_TAG: &[u8] = b"PROXY ";
 const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
-
 /// Information from proxy protocol are provided through `WithProxyInfo` trait,
 /// which provides original addresses from PROXY protocol
-/// 
+///
 /// For compatibility it's also implemented for `tokio::net::TcpSteam`, where it returns `None`
 pub trait WithProxyInfo {
     // TODO: or original_source_addr - which one is better?
     /// Returns address of original source of the connection (client)
     fn original_peer_addr(&self) -> Option<SocketAddr> {
-        
         None
     }
 
@@ -67,7 +65,6 @@ impl Default for Acceptor {
 }
 
 impl Acceptor {
-
     /// Processes proxy protocol header and creates [`ProxyStream`]
     /// with appropriate information in it
     pub async fn accept<T: AsyncRead>(self, mut stream: T) -> Result<ProxyStream<T>> {
@@ -136,7 +133,7 @@ impl Acceptor {
     }
 
     /// If true accepted connection will pass the PROXY header, so it can be read from [`ProxyStream`].
-    /// Default is false, which is normal behavior - PROXY header is consumed and stream starts 
+    /// Default is false, which is normal behavior - PROXY header is consumed and stream starts
     /// with further data
     pub fn pass_proxy_header(self, pass_proxy_header: bool) -> Self {
         Acceptor {

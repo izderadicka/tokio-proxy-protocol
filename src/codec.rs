@@ -3,22 +3,31 @@ use bytes::{Buf, BufMut, BytesMut};
 use std::convert::TryFrom;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
-use tokio_util::codec::{Decoder, Encoder};
+use tokio::{prelude::*, stream::StreamExt};
+use tokio_util::codec::{Decoder, Encoder, Framed, FramedParts};
 
-pub const MAX_HEADER_SIZE: usize = 536;
-pub const MIN_HEADER_SIZE: usize = 15;
+pub(crate) const MAX_HEADER_SIZE: usize = 536;
+pub(crate) const MIN_HEADER_SIZE: usize = 15;
 
+/// Type of transport
 #[derive(PartialEq, Eq, Debug, Clone)]
-pub(crate) enum SocketType {
+pub enum SocketType {
+    /// TCP/IP V4
     Ipv4,
+    /// TCP/IP V6
     Ipv6,
+    /// Transport protocol in unknown
     Unknown,
 }
 
+/// Contains informatin from PROXY prorocol
 #[derive(PartialEq, Eq, Debug, Clone)]
-pub(crate) struct ProxyInfo {
+pub struct ProxyInfo {
+    /// Type of transport
     pub socket_type: SocketType,
+    /// Original source address passed in PROXY protocol
     pub original_source: Option<SocketAddr>,
+    /// Original destination address passed in PROXY protocol
     pub original_destination: Option<SocketAddr>,
 }
 
@@ -51,7 +60,7 @@ impl TryFrom<(Option<SocketAddr>, Option<SocketAddr>)> for ProxyInfo {
     }
 }
 
-pub(crate) struct ProxyProtocolCodecV1 {
+pub struct ProxyProtocolCodecV1 {
     next_pos: usize,
     pass_header: bool,
 }
@@ -198,6 +207,25 @@ impl Encoder<ProxyInfo> for ProxyProtocolCodecV1 {
     }
 }
 
+/// Helper function to accept stream with PROXY protocol header v1
+///
+/// Consumes header and returns appropriate `ProxyInfo` and rest of data as `FramedParts`,
+/// which can be used to easily create new Framed struct (with different codec)
+pub async fn accept_v1_framed<T>(
+    stream: T,
+) -> Result<(ProxyInfo, FramedParts<T, ProxyProtocolCodecV1>)>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut framed = Framed::new(stream, ProxyProtocolCodecV1::new());
+    let proxy_info = framed
+        .next()
+        .await
+        .ok_or_else(|| Error::Proxy("Proxy header is missing".into()))??;
+    let parts = framed.into_parts();
+    Ok((proxy_info, parts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +344,58 @@ mod tests {
         assert_eq!(SocketType::Ipv6, header_info.socket_type);
         assert_eq!(original_source, header_info.original_source);
         assert_eq!(original_destination, header_info.original_destination);
+    }
+
+    #[tokio::test]
+    async fn test_accept_v1() {
+        use std::io::Cursor;
+        let message = Cursor::new(
+            "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHello"
+                .as_bytes()
+                .to_vec(),
+        );
+        let (info, parts) = accept_v1_framed(message)
+            .await
+            .expect("Error parsing header");
+
+        assert_eq!(SocketType::Ipv4, info.socket_type);
+        assert_eq!(info.original_source, "192.168.0.1:56324".parse().ok());
+        assert_eq!(info.original_destination, "192.168.0.11:443".parse().ok());
+
+        assert_eq!(b"Hello", &parts.read_buf[..])
+    }
+
+    #[tokio::test]
+    async fn test_accept_v1_incomplete_header() {
+        use std::io::Cursor;
+        let message = Cursor::new("PROXY TCP4 192.168.0.1 192.168.".as_bytes().to_vec());
+        let res = accept_v1_framed(message).await;
+
+        assert!(res.is_err());
+
+        if let Err(Error::Io(e)) = res {
+            println!("ERROR: {:?}", e);
+        } else {
+            panic!("Invalid error")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_accept_v1_malformed() {
+        use std::io::Cursor;
+        let message = Cursor::new(
+            "PROXY TCP4 192.168.0.1 192.168.\r\nHello"
+                .as_bytes()
+                .to_vec(),
+        );
+        let res = accept_v1_framed(message).await;
+
+        assert!(res.is_err());
+
+        if let Err(Error::Proxy(e)) = res {
+            println!("ERROR: {}", e);
+        } else {
+            panic!("Invalid error")
+        }
     }
 }
