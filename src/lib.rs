@@ -152,15 +152,19 @@ impl Acceptor {
         }
     }
 
+    /// If true v1 PROXY protocol is supported (default)
     pub fn support_v1(self, support_v1: bool) -> Self {
         Acceptor { support_v1, ..self }
     }
 
+    /// TODO: Add v2 support
+    /// If true v2 PROXY protocol is supported (default)
     pub fn support_v2(self, support_v2: bool) -> Self {
         Acceptor { support_v2, ..self }
     }
 }
 
+/// `Connector` enables to add PROXY protocol header to outgoing stream
 pub struct Connector {
     use_v2: bool,
 }
@@ -172,32 +176,37 @@ impl Default for Connector {
 }
 
 impl Connector {
+    /// Creates new `Connector`
     pub fn new() -> Self {
         Connector::default()
     }
 
+    /// TODO: Add v2 support
+    /// If `use_v2` is true, v2 header will be added
     pub fn use_v2(self, use_v2: bool) -> Self {
         Connector { use_v2 }
     }
 
-    /// Creates outgoing connection with appropriate proxy protocol header
+    /// Creates outgoing TCP connection with appropriate PROXY protocol header
     pub async fn connect<A: ToSocketAddrs>(
         &self,
         addr: A,
         original_source: Option<SocketAddr>,
         original_destination: Option<SocketAddr>,
     ) -> Result<TcpStream> {
-        let stream = TcpStream::connect(addr).await?;
-        self.connect_to(stream, original_source, original_destination)
-            .await
+        let mut stream = TcpStream::connect(addr).await?;
+        self.connect_to(&mut stream, original_source, original_destination)
+            .await?;
+        Ok(stream)
     }
 
+    /// Adds appropriate PROXY protocol header to given stream
     pub async fn connect_to<T: AsyncWrite + Unpin>(
         &self,
-        mut dest: T,
+        dest: &mut T,
         original_source: Option<SocketAddr>,
         original_destination: Option<SocketAddr>,
-    ) -> Result<T> {
+    ) -> Result<()> {
         let proxy_info = (original_source, original_destination).try_into()?;
         let mut data = BytesMut::new();
         if !self.use_v2 {
@@ -206,10 +215,14 @@ impl Connector {
             unimplemented!("V2 Protocol is not implemented")
         }
         dest.write(&data).await?;
-        Ok(dest)
+        Ok(())
     }
 }
 
+/// Stream containing information from PROXY protocol
+///
+/// It implements `AsyncRead` and `AsyncWrite` so it can be used as a replacement of `TcpStream`
+/// or other byte streams
 #[pin_project]
 pub struct ProxyStream<T> {
     #[pin]
@@ -252,6 +265,7 @@ impl std::ops::Deref for ProxyStream<TcpStream> {
     }
 }
 
+// TODO: do we want to allow this - because it can cause problem, if used unwisely
 // actually DerefMut mut can be quite dangerous, because it'll enable to inner stream, while some data are already in buffer
 // impl std::ops::DerefMut for ProxyStream<TcpStream> {
 //     fn deref_mut(&mut self) -> &mut Self::Target {

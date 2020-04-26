@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+/// Error type for this module
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Proxy protocol error: {0}")]
@@ -21,4 +22,5 @@ pub enum Error {
     InvalidState(String),
 }
 
+/// Convenient Result type, with our Error included
 pub type Result<T> = std::result::Result<T, Error>;

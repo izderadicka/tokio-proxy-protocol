@@ -20,7 +20,7 @@ pub enum SocketType {
     Unknown,
 }
 
-/// Contains informatin from PROXY prorocol
+/// Contains information from PROXY protocol
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ProxyInfo {
     /// Type of transport
@@ -60,6 +60,7 @@ impl TryFrom<(Option<SocketAddr>, Option<SocketAddr>)> for ProxyInfo {
     }
 }
 
+/// Encoder and Decoder for PROXY protocol v1
 pub struct ProxyProtocolCodecV1 {
     next_pos: usize,
     pass_header: bool,
