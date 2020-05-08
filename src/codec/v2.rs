@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
-use std::net::SocketAddrV4;
+use std::net::{SocketAddrV4, SocketAddrV6};
 
 pub const SIGNATURE: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
@@ -85,8 +85,10 @@ const SIZE_ADDRESSES_UNIX: u16 = 216;
 pub enum Error {
     #[error("Invalid header: {0}")]
     Header(String),
-    #[error("Invalid address: {0}")]
+    #[error("Invalid IP4 address: {0}")]
     AddressIp4(String),
+    #[error("Invalid IP6 address: {0}")]
+    AddressIp6(String),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -177,7 +179,7 @@ impl From<Ip4Addresses> for (SocketAddrV4, SocketAddrV4) {
     fn from(addresses: Ip4Addresses) -> Self {
         let src_addr = SocketAddrV4::new(u32::to_be_bytes(addresses.src_addr).into(), addresses.src_port);
         let dst_addr = SocketAddrV4::new(u32::to_be_bytes(addresses.dst_addr).into(), addresses.dst_port);
-        (src_addr, dst_addr)
+        (dst_addr, dst_addr)
     }
 }
 
@@ -203,12 +205,61 @@ impl Serialize for Ip4Addresses {
     }
 }
 
-
+#[derive(Debug, PartialEq, Eq)]
 struct Ip6Addresses {
     src_addr: [u8; 16],
     dst_addr: [u8; 16],
     src_port: u16,
     dst_port: u16,
+}
+
+impl From<(SocketAddrV6, SocketAddrV6)> for Ip6Addresses {
+    fn from(addresses: (SocketAddrV6, SocketAddrV6)) -> Self {
+        let (src_addr, dst_addr) = addresses;
+        Ip6Addresses {
+            src_addr: src_addr.ip().octets(),
+            dst_addr: dst_addr.ip().octets(),
+            src_port:  src_addr.port(),
+            dst_port: dst_addr.port()
+        }
+        
+    }
+}
+
+impl From<Ip6Addresses> for (SocketAddrV6, SocketAddrV6) {
+    fn from(addresses: Ip6Addresses) -> Self {
+
+        let src_addr = SocketAddrV6::new(addresses.src_addr.into(), addresses.src_port, 0, 0);
+        let dst_addr = SocketAddrV6::new(addresses.dst_addr.into(), addresses.dst_port, 0, 0);
+        (src_addr, dst_addr)
+    }
+}
+
+impl Serialize for Ip6Addresses {
+    fn serialize(&self, buf: &mut BytesMut) {
+        buf.put(&self.src_addr[..]);
+        buf.put(&self.dst_addr[..]);
+        buf.put_u16(self.src_port);
+        buf.put_u16(self.dst_port);
+    }
+
+    fn deserialize(buf: &mut BytesMut) -> Result<Self> {
+        if buf.len() < SIZE_ADDRESSES_IP6 as usize {
+            return Err(Error::AddressIp6("Too short for IP6 addresses block".into()));
+        }
+        let mut src_addr = [0;16];
+        let mut dst_addr = [0;16];
+        (&mut src_addr[..]).copy_from_slice(&buf[0..16]);
+        buf.advance(16);
+        (&mut dst_addr[..]).copy_from_slice(&buf[0..16]);
+        buf.advance(16);
+        Ok(Ip6Addresses {
+            src_addr,
+            dst_addr,
+            src_port: buf.get_u16(),
+            dst_port: buf.get_u16()
+        })
+    }
 }
 
 struct UnixAddresses {
@@ -245,5 +296,21 @@ mod test {
         let (src_addr2, dst_addr2) = a2.into();
         assert_eq!((src_addr, dst_addr), (src_addr2, dst_addr2));
     }
+
+    #[test]
+    fn test_ip6_addresses_serialize_deserialize() {
+        let src_addr: SocketAddrV6 = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ff11]:65535".parse().unwrap();
+        let dst_addr: SocketAddrV6 = "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aa11]:65534".parse().unwrap();
+        let a1: Ip6Addresses = (src_addr.clone(), dst_addr.clone()).into();
+        let mut buf = BytesMut::new();
+        a1.serialize(&mut buf);
+        let a2 = Ip6Addresses::deserialize(&mut buf).unwrap();
+        assert_eq!(a1, a2);
+        assert!(buf.is_empty());
+
+        let (src_addr2, dst_addr2) = a2.into();
+        assert_eq!((src_addr, dst_addr), (src_addr2, dst_addr2));
+    }
+
 
 }
