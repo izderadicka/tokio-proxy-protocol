@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
+use std::net::SocketAddrV4;
 
 pub const SIGNATURE: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
@@ -85,7 +86,7 @@ pub enum Error {
     #[error("Invalid header: {0}")]
     Header(String),
     #[error("Invalid address: {0}")]
-    Address(String),
+    AddressIp4(String),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -150,12 +151,58 @@ impl Serialize for Header {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct Ip4Addresses {
     src_addr: u32,
     dst_addr: u32,
     src_port: u16,
     dst_port: u16,
 }
+
+impl From<(SocketAddrV4, SocketAddrV4)> for Ip4Addresses {
+
+    fn from(addresses: (SocketAddrV4, SocketAddrV4)) -> Self {
+        let (src, dst) = addresses;
+        Ip4Addresses{
+            src_addr: u32::from_be_bytes(src.ip().octets()),
+            dst_addr: u32::from_be_bytes(dst.ip().octets()),
+            src_port: src.port(),
+            dst_port: dst.port()
+    }
+}
+
+}
+
+impl From<Ip4Addresses> for (SocketAddrV4, SocketAddrV4) {
+    fn from(addresses: Ip4Addresses) -> Self {
+        let src_addr = SocketAddrV4::new(u32::to_be_bytes(addresses.src_addr).into(), addresses.src_port);
+        let dst_addr = SocketAddrV4::new(u32::to_be_bytes(addresses.dst_addr).into(), addresses.dst_port);
+        (src_addr, dst_addr)
+    }
+}
+
+impl Serialize for Ip4Addresses {
+    fn serialize(&self, buf: &mut BytesMut) {
+        buf.reserve(SIZE_ADDRESSES_IP4 as usize);
+        buf.put_u32(self.src_addr);
+        buf.put_u32(self.dst_addr);
+        buf.put_u16(self.src_port);
+        buf.put_u16(self.dst_port)
+    }
+
+    fn deserialize(buf: &mut BytesMut) -> Result<Self> {
+        if buf.len() < SIZE_ADDRESSES_IP4 as usize {
+            return Err(Error::AddressIp4("Too short for IP4 addresses block".into()))
+        }
+        Ok(Ip4Addresses {
+            src_addr: buf.get_u32(),
+            dst_addr: buf.get_u32(),
+            src_port: buf.get_u16(),
+            dst_port: buf.get_u16()
+        })
+    }
+}
+
 
 struct Ip6Addresses {
     src_addr: [u8; 16],
@@ -182,6 +229,21 @@ mod test {
         let h2 = Header::deserialize(&mut buf).expect("deserialization error");
         assert_eq!(h1, h2);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_ip4_addresses_serialize_deserialize() {
+        let src_addr: SocketAddrV4 = "127.0.0.1:1234".parse().unwrap();
+        let dst_addr: SocketAddrV4 = "127.0.0.1:5678".parse().unwrap();
+        let a1: Ip4Addresses = (src_addr.clone(), dst_addr.clone()).into();
+        let mut buf = BytesMut::new();
+        a1.serialize(&mut buf);
+        let a2 = Ip4Addresses::deserialize(&mut buf).unwrap();
+        assert_eq!(a1, a2);
+        assert!(buf.is_empty());
+
+        let (src_addr2, dst_addr2) = a2.into();
+        assert_eq!((src_addr, dst_addr), (src_addr2, dst_addr2));
     }
 
 }
