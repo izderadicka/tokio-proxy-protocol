@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use bytes::{Buf, BufMut, BytesMut};
-use thiserror::Error;
 use std::net::{SocketAddrV4, SocketAddrV6};
+use thiserror::Error;
 
 pub const SIGNATURE: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
@@ -133,16 +133,15 @@ impl Serialize for Header {
         }
 
         let protocol = buf.get_u8();
-        if ! VALID_PROTOCOLS.contains(&protocol) {
+        if !VALID_PROTOCOLS.contains(&protocol) {
             return Err(Error::Header("Invalid network protocol specified".into()));
         }
         let len = buf.get_u16();
-        Ok(Header{
+        Ok(Header {
             version_and_command,
             protocol,
-            len
+            len,
         })
-
     }
     fn serialize(&self, buf: &mut BytesMut) {
         buf.reserve((SIZE_HEADER + self.len) as usize);
@@ -162,24 +161,28 @@ struct Ip4Addresses {
 }
 
 impl From<(SocketAddrV4, SocketAddrV4)> for Ip4Addresses {
-
     fn from(addresses: (SocketAddrV4, SocketAddrV4)) -> Self {
         let (src, dst) = addresses;
-        Ip4Addresses{
+        Ip4Addresses {
             src_addr: u32::from_be_bytes(src.ip().octets()),
             dst_addr: u32::from_be_bytes(dst.ip().octets()),
             src_port: src.port(),
-            dst_port: dst.port()
+            dst_port: dst.port(),
+        }
     }
-}
-
 }
 
 impl From<Ip4Addresses> for (SocketAddrV4, SocketAddrV4) {
     fn from(addresses: Ip4Addresses) -> Self {
-        let src_addr = SocketAddrV4::new(u32::to_be_bytes(addresses.src_addr).into(), addresses.src_port);
-        let dst_addr = SocketAddrV4::new(u32::to_be_bytes(addresses.dst_addr).into(), addresses.dst_port);
-        (dst_addr, dst_addr)
+        let src_addr = SocketAddrV4::new(
+            u32::to_be_bytes(addresses.src_addr).into(),
+            addresses.src_port,
+        );
+        let dst_addr = SocketAddrV4::new(
+            u32::to_be_bytes(addresses.dst_addr).into(),
+            addresses.dst_port,
+        );
+        (src_addr, dst_addr)
     }
 }
 
@@ -194,13 +197,15 @@ impl Serialize for Ip4Addresses {
 
     fn deserialize(buf: &mut BytesMut) -> Result<Self> {
         if buf.len() < SIZE_ADDRESSES_IP4 as usize {
-            return Err(Error::AddressIp4("Too short for IP4 addresses block".into()))
+            return Err(Error::AddressIp4(
+                "Too short for IP4 addresses block".into(),
+            ));
         }
         Ok(Ip4Addresses {
             src_addr: buf.get_u32(),
             dst_addr: buf.get_u32(),
             src_port: buf.get_u16(),
-            dst_port: buf.get_u16()
+            dst_port: buf.get_u16(),
         })
     }
 }
@@ -219,16 +224,14 @@ impl From<(SocketAddrV6, SocketAddrV6)> for Ip6Addresses {
         Ip6Addresses {
             src_addr: src_addr.ip().octets(),
             dst_addr: dst_addr.ip().octets(),
-            src_port:  src_addr.port(),
-            dst_port: dst_addr.port()
+            src_port: src_addr.port(),
+            dst_port: dst_addr.port(),
         }
-        
     }
 }
 
 impl From<Ip6Addresses> for (SocketAddrV6, SocketAddrV6) {
     fn from(addresses: Ip6Addresses) -> Self {
-
         let src_addr = SocketAddrV6::new(addresses.src_addr.into(), addresses.src_port, 0, 0);
         let dst_addr = SocketAddrV6::new(addresses.dst_addr.into(), addresses.dst_port, 0, 0);
         (src_addr, dst_addr)
@@ -245,10 +248,12 @@ impl Serialize for Ip6Addresses {
 
     fn deserialize(buf: &mut BytesMut) -> Result<Self> {
         if buf.len() < SIZE_ADDRESSES_IP6 as usize {
-            return Err(Error::AddressIp6("Too short for IP6 addresses block".into()));
+            return Err(Error::AddressIp6(
+                "Too short for IP6 addresses block".into(),
+            ));
         }
-        let mut src_addr = [0;16];
-        let mut dst_addr = [0;16];
+        let mut src_addr = [0; 16];
+        let mut dst_addr = [0; 16];
         (&mut src_addr[..]).copy_from_slice(&buf[0..16]);
         buf.advance(16);
         (&mut dst_addr[..]).copy_from_slice(&buf[0..16]);
@@ -257,7 +262,7 @@ impl Serialize for Ip6Addresses {
             src_addr,
             dst_addr,
             src_port: buf.get_u16(),
-            dst_port: buf.get_u16()
+            dst_port: buf.get_u16(),
         })
     }
 }
@@ -266,7 +271,6 @@ struct UnixAddresses {
     src_addr: [u8; 108],
     dst_addr: [u8; 108],
 }
-
 
 #[cfg(test)]
 mod test {
@@ -299,8 +303,12 @@ mod test {
 
     #[test]
     fn test_ip6_addresses_serialize_deserialize() {
-        let src_addr: SocketAddrV6 = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ff11]:65535".parse().unwrap();
-        let dst_addr: SocketAddrV6 = "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aa11]:65534".parse().unwrap();
+        let src_addr: SocketAddrV6 = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ff11]:65535"
+            .parse()
+            .unwrap();
+        let dst_addr: SocketAddrV6 = "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aa11]:65534"
+            .parse()
+            .unwrap();
         let a1: Ip6Addresses = (src_addr.clone(), dst_addr.clone()).into();
         let mut buf = BytesMut::new();
         a1.serialize(&mut buf);
@@ -311,6 +319,4 @@ mod test {
         let (src_addr2, dst_addr2) = a2.into();
         assert_eq!((src_addr, dst_addr), (src_addr2, dst_addr2));
     }
-
-
 }
