@@ -24,7 +24,7 @@ pub mod codec;
 pub mod error;
 
 const V1_TAG: &[u8] = b"PROXY ";
-const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
+const V2_TAG: &[u8] = codec::v2::SIGNATURE;
 
 /// Information from proxy protocol are provided through `WithProxyInfo` trait,
 /// which provides original addresses from PROXY protocol

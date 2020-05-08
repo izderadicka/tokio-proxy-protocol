@@ -6,6 +6,8 @@ use std::str::FromStr;
 use tokio::{prelude::*, stream::StreamExt};
 use tokio_util::codec::{Decoder, Encoder, Framed, FramedParts};
 
+pub mod v2;
+
 pub(crate) const MAX_HEADER_SIZE: usize = 536;
 pub(crate) const MIN_HEADER_SIZE: usize = 15;
 
