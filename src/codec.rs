@@ -65,7 +65,6 @@ impl TryFrom<(Option<SocketAddr>, Option<SocketAddr>)> for ProxyInfo {
 /// Encoder and Decoder for PROXY protocol v1
 pub struct ProxyProtocolCodecV1 {
     next_pos: usize,
-    pass_header: bool,
 }
 
 impl Default for ProxyProtocolCodecV1 {
@@ -78,14 +77,6 @@ impl ProxyProtocolCodecV1 {
     pub fn new() -> Self {
         ProxyProtocolCodecV1 {
             next_pos: 0,
-            pass_header: false,
-        }
-    }
-
-    pub fn new_with_pass_header(pass_header: bool) -> Self {
-        ProxyProtocolCodecV1 {
-            next_pos: 0,
-            pass_header,
         }
     }
 }
@@ -157,11 +148,7 @@ impl Decoder for ProxyProtocolCodecV1 {
                 }
                 _ => Err(Error::Proxy(format!("Invalid proxy header v1: {}", header))),
             };
-
-            if !self.pass_header {
-                buf.advance(eol_pos + 2);
-            }
-
+            buf.advance(eol_pos + 2);
             res
         } else if buf.len() < MAX_HEADER_SIZE {
             self.next_pos = if buf.is_empty() { 0 } else { buf.len() - 1 };
