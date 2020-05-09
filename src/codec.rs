@@ -75,9 +75,7 @@ impl Default for ProxyProtocolCodecV1 {
 
 impl ProxyProtocolCodecV1 {
     pub fn new() -> Self {
-        ProxyProtocolCodecV1 {
-            next_pos: 0,
-        }
+        ProxyProtocolCodecV1 { next_pos: 0 }
     }
 }
 
@@ -208,6 +206,25 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let mut framed = Framed::new(stream, ProxyProtocolCodecV1::new());
+    let proxy_info = framed
+        .next()
+        .await
+        .ok_or_else(|| Error::Proxy("Proxy header is missing".into()))??;
+    let parts = framed.into_parts();
+    Ok((proxy_info, parts))
+}
+
+/// Helper function to accept stream with PROXY protocol header v2
+///
+/// Consumes header and returns appropriate `ProxyInfo` and rest of data as `FramedParts`,
+/// which can be used to easily create new Framed struct (with different codec)
+pub async fn accept_v2_framed<T>(
+    stream: T,
+) -> Result<(ProxyInfo, FramedParts<T, v2::ProxyProtocolCodecV2>)>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut framed = Framed::new(stream, v2::ProxyProtocolCodecV2::new());
     let proxy_info = framed
         .next()
         .await

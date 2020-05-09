@@ -3,7 +3,7 @@ use crate::error::Error;
 use bytes::BytesMut;
 use proto::*;
 use std::net::SocketAddr;
-use tokio_util::codec::{Decoder, Encoder, Framed, FramedParts};
+use tokio_util::codec::{Decoder, Encoder};
 
 pub mod proto;
 
@@ -95,10 +95,10 @@ impl Decoder for ProxyProtocolCodecV2 {
 impl Encoder<ProxyInfo> for ProxyProtocolCodecV2 {
     type Error = Error;
     fn encode(&mut self, item: ProxyInfo, buf: &mut BytesMut) -> Result<(), Self::Error> {
+        let header = Header::new(item.socket_type);
+        header.serialize(buf);
         match item.socket_type {
             SocketType::Ipv4 => {
-                let header = Header::new_tcp4();
-                header.serialize(buf);
                 if let (Some(SocketAddr::V4(src)), Some(SocketAddr::V4(dst))) =
                     (item.original_source, item.original_destination)
                 {
@@ -108,7 +108,18 @@ impl Encoder<ProxyInfo> for ProxyProtocolCodecV2 {
                     return Err(Error::Proxy("Both V4 addresses must be present".into()));
                 }
             }
-            _ => unimplemented!(),
+
+            SocketType::Ipv6 => {
+                if let (Some(SocketAddr::V6(src)), Some(SocketAddr::V6(dst))) =
+                    (item.original_source, item.original_destination)
+                {
+                    let addresses: Ip6Addresses = (src, dst).into();
+                    addresses.serialize(buf);
+                } else {
+                    return Err(Error::Proxy("Both V4 addresses must be present".into()));
+                }
+            }
+            SocketType::Unknown => (),
         }
 
         Ok(())
@@ -155,6 +166,30 @@ mod tests {
         let dst_addr: SocketAddr = "127.0.0.2:443".parse().unwrap();
         let info = ProxyInfo {
             socket_type: SocketType::Ipv4,
+            original_source: Some(src_addr),
+            original_destination: Some(dst_addr),
+        };
+        let mut buf = BytesMut::new();
+        let mut codec = ProxyProtocolCodecV2::new();
+        codec.encode(info.clone(), &mut buf).expect("encoding ok");
+        let info2 = codec
+            .decode(&mut buf)
+            .expect("decoding ok")
+            .expect("has enough data");
+        assert_eq!(info, info2);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_v2_ip6_encode_decode() {
+        let src_addr: SocketAddr = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:80"
+            .parse()
+            .unwrap();
+        let dst_addr: SocketAddr = "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa]:443"
+            .parse()
+            .unwrap();
+        let info = ProxyInfo {
+            socket_type: SocketType::Ipv6,
             original_source: Some(src_addr),
             original_destination: Some(dst_addr),
         };

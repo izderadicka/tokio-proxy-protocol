@@ -17,7 +17,9 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::prelude::*;
 use tokio_util::codec::{Decoder, Encoder};
 
-use codec::{ProxyProtocolCodecV1, ProxyInfo, MAX_HEADER_SIZE, MIN_HEADER_SIZE, v2::ProxyProtocolCodecV2};
+use codec::{
+    v2::ProxyProtocolCodecV2, ProxyInfo, ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE,
+};
 use error::{Error, Result};
 
 pub mod codec;
@@ -112,10 +114,14 @@ impl Acceptor {
         }
     }
 
-    async fn decode_header<C, T>(mut buf: BytesMut, mut stream: T, codec: &mut C) -> Result<ProxyStream<T>> 
-    where T: AsyncRead,
-        C: Decoder<Item=ProxyInfo, Error=Error>
-        
+    async fn decode_header<C, T>(
+        mut buf: BytesMut,
+        mut stream: T,
+        codec: &mut C,
+    ) -> Result<ProxyStream<T>>
+    where
+        T: AsyncRead,
+        C: Decoder<Item = ProxyInfo, Error = Error>,
     {
         loop {
             if let Some(proxy_info) = codec.decode(&mut buf)? {
@@ -370,7 +376,9 @@ mod tests {
         env_logger::try_init().ok();
         let mut message = Vec::new();
         message.extend_from_slice(V2_TAG);
-        message.extend(&[0x21, 0x11, 0, 12, 192, 168, 0, 1, 192, 168, 0, 11, 0xdc, 0x04, 1, 187]);
+        message.extend(&[
+            0x21, 0x11, 0, 12, 192, 168, 0, 1, 192, 168, 0, 11, 0xdc, 0x04, 1, 187,
+        ]);
         message.extend(b"Hello");
 
         let mut ps = Acceptor::new().accept(&message[..]).await?;

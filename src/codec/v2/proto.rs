@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::SIGNATURE;
+use super::{SocketType, SIGNATURE};
 use bytes::{Buf, BufMut, BytesMut};
 use std::net::{SocketAddrV4, SocketAddrV6};
 use thiserror::Error;
@@ -104,11 +104,16 @@ pub(super) struct Header {
 }
 
 impl Header {
-    pub(super) fn new_tcp4() -> Self {
+    pub(super) fn new(typ: SocketType) -> Self {
+        let (protocol, len) = match typ {
+            SocketType::Unknown => (PROTOCOL_UNSPEC, 0),
+            SocketType::Ipv4 => (PROTOCOL_TCP_IP4, SIZE_ADDRESSES_IP4),
+            SocketType::Ipv6 => (PROTOCOL_TCP_IP6, SIZE_ADDRESSES_IP6),
+        };
         Header {
             version_and_command: VERSION_COMMAND,
-            protocol: PROTOCOL_TCP_IP4,
-            len: SIZE_ADDRESSES_IP4,
+            protocol,
+            len,
         }
     }
 }
@@ -277,7 +282,7 @@ mod test {
 
     #[test]
     fn test_header_serialize_deserialize() {
-        let h1 = Header::new_tcp4();
+        let h1 = Header::new(SocketType::Ipv4);
         let mut buf = BytesMut::new();
         h1.serialize(&mut buf);
         let h2 = Header::deserialize(&mut buf).expect("deserialization error");
