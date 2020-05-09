@@ -17,14 +17,14 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::prelude::*;
 use tokio_util::codec::{Decoder, Encoder};
 
-use codec::{ProxyProtocolCodecV1, MAX_HEADER_SIZE, MIN_HEADER_SIZE};
+use codec::{ProxyProtocolCodecV1, ProxyInfo, MAX_HEADER_SIZE, MIN_HEADER_SIZE, v2::ProxyProtocolCodecV2};
 use error::{Error, Result};
 
 pub mod codec;
 pub mod error;
 
 const V1_TAG: &[u8] = b"PROXY ";
-const V2_TAG: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
+const V2_TAG: &[u8] = codec::v2::SIGNATURE;
 
 /// Information from proxy protocol are provided through `WithProxyInfo` trait,
 /// which provides original addresses from PROXY protocol
@@ -47,7 +47,6 @@ impl WithProxyInfo for TcpStream {}
 
 /// Struct to accept stream with PROXY header and extract information from it
 pub struct Acceptor {
-    pass_proxy_header: bool,
     require_proxy_header: bool,
     support_v1: bool,
     support_v2: bool,
@@ -56,7 +55,6 @@ pub struct Acceptor {
 impl Default for Acceptor {
     fn default() -> Self {
         Acceptor {
-            pass_proxy_header: false,
             require_proxy_header: false,
             support_v1: true,
             support_v2: true,
@@ -94,25 +92,12 @@ impl Acceptor {
 
         if &buf[0..6] == V1_TAG && self.support_v1 {
             debug!("Detected proxy protocol v1 tag");
-            let mut codec = ProxyProtocolCodecV1::new_with_pass_header(self.pass_proxy_header);
-            loop {
-                if let Some(proxy_info) = codec.decode(&mut buf)? {
-                    return Ok(ProxyStream {
-                        inner: stream,
-                        buf,
-                        orig_source: proxy_info.original_source,
-                        orig_destination: proxy_info.original_destination,
-                    });
-                }
-
-                let r = stream.read_buf(&mut buf).await?;
-                if r == 0 {
-                    return Err(Error::Proxy("Incomplete V1 header".into()));
-                }
-            }
+            let mut codec = ProxyProtocolCodecV1::new();
+            Acceptor::decode_header(buf, stream, &mut codec).await
         } else if &buf[0..12] == V2_TAG && self.support_v2 {
             debug!("Detected proxy protocol v2 tag");
-            unimplemented!("V2 not yet implemented") //TODO: Implement V2 protocol
+            let mut codec = ProxyProtocolCodecV2::new();
+            Acceptor::decode_header(buf, stream, &mut codec).await
         } else if self.require_proxy_header {
             error!("Proxy protocol is required");
             Err(Error::Proxy("Proxy protocol is required".into()))
@@ -127,19 +112,31 @@ impl Acceptor {
         }
     }
 
+    async fn decode_header<C, T>(mut buf: BytesMut, mut stream: T, codec: &mut C) -> Result<ProxyStream<T>> 
+    where T: AsyncRead,
+        C: Decoder<Item=ProxyInfo, Error=Error>
+        
+    {
+        loop {
+            if let Some(proxy_info) = codec.decode(&mut buf)? {
+                return Ok(ProxyStream {
+                    inner: stream,
+                    buf,
+                    orig_source: proxy_info.original_source,
+                    orig_destination: proxy_info.original_destination,
+                });
+            }
+
+            let r = stream.read_buf(&mut buf).await?;
+            if r == 0 {
+                return Err(Error::Proxy("Incomplete V1 header".into()));
+            }
+        }
+    }
+
     /// Creates new default `Acceptor`
     pub fn new() -> Self {
         Acceptor::default()
-    }
-
-    /// If true accepted connection will pass the PROXY header, so it can be read from [`ProxyStream`].
-    /// Default is false, which is normal behavior - PROXY header is consumed and stream starts
-    /// with further data
-    pub fn pass_proxy_header(self, pass_proxy_header: bool) -> Self {
-        Acceptor {
-            pass_proxy_header,
-            ..self
-        }
     }
 
     /// If true (default) PROXY header is required in accepted stream, if not present error is raised.
@@ -369,13 +366,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_v1_header_pass() -> Result<()> {
+    async fn test_v2tcp4() -> Result<()> {
         env_logger::try_init().ok();
-        let message = "PROXY TCP4 192.168.0.1 192.168.0.11 56324 443\r\nHELLO".as_bytes();
-        let mut ps = Acceptor::new()
-            .pass_proxy_header(true)
-            .accept(message)
-            .await?;
+        let mut message = Vec::new();
+        message.extend_from_slice(V2_TAG);
+        message.extend(&[0x21, 0x11, 0, 12, 192, 168, 0, 1, 192, 168, 0, 11, 0xdc, 0x04, 1, 187]);
+        message.extend(b"Hello");
+
+        let mut ps = Acceptor::new().accept(&message[..]).await?;
         assert_eq!(
             "192.168.0.1:56324".parse::<SocketAddr>().unwrap(),
             ps.original_peer_addr().unwrap()
@@ -386,7 +384,7 @@ mod tests {
         );
         let mut buf = Vec::new();
         ps.read_to_end(&mut buf).await?;
-        assert_eq!(message, &buf[..]);
+        assert_eq!(b"Hello", &buf[..]);
         Ok(())
     }
 

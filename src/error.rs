@@ -6,6 +6,9 @@ pub enum Error {
     #[error("Proxy protocol error: {0}")]
     Proxy(String),
 
+    #[error("Proxy protocol V2 error: {0}")]
+    ProxyV2(#[from] crate::codec::v2::proto::Error),
+
     #[error("IO error: {0}")]
     Io(#[from] tokio::io::Error),
 
