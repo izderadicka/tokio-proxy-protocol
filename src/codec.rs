@@ -12,7 +12,7 @@ pub(crate) const MAX_HEADER_SIZE: usize = 536;
 pub(crate) const MIN_HEADER_SIZE: usize = 15;
 
 /// Type of transport
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum SocketType {
     /// TCP/IP V4
     Ipv4,

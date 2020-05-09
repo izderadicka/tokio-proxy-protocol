@@ -1,322 +1,171 @@
-#![allow(dead_code)]
-use bytes::{Buf, BufMut, BytesMut};
-use std::net::{SocketAddrV4, SocketAddrV6};
-use thiserror::Error;
+use super::{ProxyInfo, SocketType};
+use crate::error::Error;
+use bytes::BytesMut;
+use proto::*;
+use std::net::SocketAddr;
+use tokio_util::codec::{Decoder, Encoder, Framed, FramedParts};
+
+pub mod proto;
 
 pub const SIGNATURE: &[u8] = b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A";
 
-// PROXY Protocol version
-// As of this specification, it must
-// always be sent as \x2 and the receiver must only accept this value.
-
-const PROXY_VERSION: u8 = 0x2;
-
-// Commands
-
-// \x0 : LOCAL : the connection was established on purpose by the proxy
-// without being relayed. The connection endpoints are the sender and the
-// receiver. Such connections exist when the proxy sends health-checks to the
-// server. The receiver must accept this connection as valid and must use the
-// real connection endpoints and discard the protocol block including the
-// family which is ignored.
-const COMMAND_LOCAL: u8 = 0x0;
-
-// \x1 : PROXY : the connection was established on behalf of another node,
-// and reflects the original connection endpoints. The receiver must then use
-// the information provided in the protocol block to get original the address.
-const COMMAND_PROXY: u8 = 0x1;
-
-// version and command
-const VERSION_COMMAND: u8 = 0x21;
-
-// Protocol byte
-
-// \x00 : UNSPEC : the connection is forwarded for an unknown, unspecified
-// or unsupported protocol. The sender should use this family when sending
-// LOCAL commands or when dealing with unsupported protocol families. When
-// used with a LOCAL command, the receiver must accept the connection and
-// ignore any address information. For other commands, the receiver is free
-// to accept the connection anyway and use the real endpoints addresses or to
-// reject the connection. The receiver should ignore address information.
-const PROTOCOL_UNSPEC: u8 = 0x00;
-
-// \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
-// protocol family. Address length is 2*4 + 2*2 = 12 bytes.
-const PROTOCOL_TCP_IP4: u8 = 0x11;
-
-// \x12 : UDP over IPv4 : the forwarded connection uses UDP over the AF_INET
-// protocol family. Address length is 2*4 + 2*2 = 12 bytes.
-const PROTOCOL_UDP_IP4: u8 = 0x12;
-
-//  \x21 : TCP over IPv6 : the forwarded connection uses TCP over the AF_INET6
-// protocol family. Address length is 2*16 + 2*2 = 36 bytes.
-const PROTOCOL_TCP_IP6: u8 = 0x21;
-
-// - \x22 : UDP over IPv6 : the forwarded connection uses UDP over the AF_INET6
-// protocol family. Address length is 2*16 + 2*2 = 36 bytes.
-const PROTOCOL_UDP_IP6: u8 = 0x22;
-
-// - \x31 : UNIX stream : the forwarded connection uses SOCK_STREAM over the
-// AF_UNIX protocol family. Address length is 2*108 = 216 bytes.
-const PROTOCOL_UNIX_SOCKET: u8 = 0x31;
-
-// - \x32 : UNIX datagram : the forwarded connection uses SOCK_DGRAM over the
-// AF_UNIX protocol family. Address length is 2*108 = 216 bytes.
-const PROTOCOL_UNIX_DATAGRAM: u8 = 0x32;
-
-const VALID_PROTOCOLS: &[u8] = &[
-    PROTOCOL_UNSPEC,
-    PROTOCOL_TCP_IP4,
-    PROTOCOL_TCP_IP6,
-    PROTOCOL_UDP_IP4,
-    PROTOCOL_UDP_IP6,
-    PROTOCOL_UNIX_SOCKET,
-    PROTOCOL_UNIX_DATAGRAM,
-];
-
-// Length
-
-const SIZE_HEADER: u16 = 16;
-const SIZE_ADDRESSES_IP4: u16 = 12;
-const SIZE_ADDRESSES_IP6: u16 = 36;
-const SIZE_ADDRESSES_UNIX: u16 = 216;
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Invalid header: {0}")]
-    Header(String),
-    #[error("Invalid IP4 address: {0}")]
-    AddressIp4(String),
-    #[error("Invalid IP6 address: {0}")]
-    AddressIp6(String),
+pub struct ProxyProtocolCodecV2 {
+    socket_type: Option<SocketType>,
+    remains: usize,
 }
 
-type Result<T> = std::result::Result<T, Error>;
-trait Serialize: Sized {
-    fn deserialize(buf: &mut BytesMut) -> Result<Self>;
-    fn serialize(&self, buf: &mut BytesMut);
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Header {
-    version_and_command: u8,
-    protocol: u8,
-    len: u16,
-}
-
-impl Header {
-    fn new_tcp4() -> Self {
-        Header {
-            version_and_command: VERSION_COMMAND,
-            protocol: PROTOCOL_TCP_IP4,
-            len: SIZE_ADDRESSES_IP4,
+impl Default for ProxyProtocolCodecV2 {
+    fn default() -> Self {
+        ProxyProtocolCodecV2 {
+            socket_type: None,
+            remains: 0,
         }
     }
 }
 
-impl Serialize for Header {
-    fn deserialize(buf: &mut BytesMut) -> Result<Self> {
-        if buf.len() < SIZE_HEADER as usize {
-            return Err(Error::Header("Too few bytes".into()));
-        }
-
-        if &buf[0..SIGNATURE.len()] != SIGNATURE {
-            return Err(Error::Header("Invalid signature".into()));
-        };
-        buf.advance(SIGNATURE.len());
-        let version_and_command = buf.get_u8();
-        if (version_and_command & 0xF0) >> 4 != PROXY_VERSION {
-            return Err(Error::Header("Invalid Version".into()));
-        }
-        if version_and_command & 0x0F > COMMAND_PROXY {
-            return Err(Error::Header("Invalid command".into()));
-        }
-
-        let protocol = buf.get_u8();
-        if !VALID_PROTOCOLS.contains(&protocol) {
-            return Err(Error::Header("Invalid network protocol specified".into()));
-        }
-        let len = buf.get_u16();
-        Ok(Header {
-            version_and_command,
-            protocol,
-            len,
-        })
-    }
-    fn serialize(&self, buf: &mut BytesMut) {
-        buf.reserve((SIZE_HEADER + self.len) as usize);
-        buf.put(SIGNATURE);
-        buf.put_u8(self.version_and_command);
-        buf.put_u8(self.protocol);
-        buf.put_u16(self.len);
+impl ProxyProtocolCodecV2 {
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct Ip4Addresses {
-    src_addr: u32,
-    dst_addr: u32,
-    src_port: u16,
-    dst_port: u16,
-}
+impl Decoder for ProxyProtocolCodecV2 {
+    type Item = ProxyInfo;
+    type Error = Error;
 
-impl From<(SocketAddrV4, SocketAddrV4)> for Ip4Addresses {
-    fn from(addresses: (SocketAddrV4, SocketAddrV4)) -> Self {
-        let (src, dst) = addresses;
-        Ip4Addresses {
-            src_addr: u32::from_be_bytes(src.ip().octets()),
-            dst_addr: u32::from_be_bytes(dst.ip().octets()),
-            src_port: src.port(),
-            dst_port: dst.port(),
-        }
-    }
-}
-
-impl From<Ip4Addresses> for (SocketAddrV4, SocketAddrV4) {
-    fn from(addresses: Ip4Addresses) -> Self {
-        let src_addr = SocketAddrV4::new(
-            u32::to_be_bytes(addresses.src_addr).into(),
-            addresses.src_port,
-        );
-        let dst_addr = SocketAddrV4::new(
-            u32::to_be_bytes(addresses.dst_addr).into(),
-            addresses.dst_port,
-        );
-        (src_addr, dst_addr)
-    }
-}
-
-impl Serialize for Ip4Addresses {
-    fn serialize(&self, buf: &mut BytesMut) {
-        buf.reserve(SIZE_ADDRESSES_IP4 as usize);
-        buf.put_u32(self.src_addr);
-        buf.put_u32(self.dst_addr);
-        buf.put_u16(self.src_port);
-        buf.put_u16(self.dst_port)
-    }
-
-    fn deserialize(buf: &mut BytesMut) -> Result<Self> {
-        if buf.len() < SIZE_ADDRESSES_IP4 as usize {
-            return Err(Error::AddressIp4(
-                "Too short for IP4 addresses block".into(),
-            ));
-        }
-        Ok(Ip4Addresses {
-            src_addr: buf.get_u32(),
-            dst_addr: buf.get_u32(),
-            src_port: buf.get_u16(),
-            dst_port: buf.get_u16(),
-        })
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Ip6Addresses {
-    src_addr: [u8; 16],
-    dst_addr: [u8; 16],
-    src_port: u16,
-    dst_port: u16,
-}
-
-impl From<(SocketAddrV6, SocketAddrV6)> for Ip6Addresses {
-    fn from(addresses: (SocketAddrV6, SocketAddrV6)) -> Self {
-        let (src_addr, dst_addr) = addresses;
-        Ip6Addresses {
-            src_addr: src_addr.ip().octets(),
-            dst_addr: dst_addr.ip().octets(),
-            src_port: src_addr.port(),
-            dst_port: dst_addr.port(),
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        loop {
+            match self.socket_type {
+                Some(t) => {
+                    if self.remains > 0 && buf.len() < self.remains {
+                        return Ok(None);
+                    } else {
+                        let mut data_buf = buf.split_to(self.remains);
+                        let info = match t {
+                            SocketType::Ipv4 => {
+                                let addresses = Ip4Addresses::deserialize(&mut data_buf)?;
+                                let (src, dst) = addresses.into();
+                                ProxyInfo {
+                                    socket_type: t,
+                                    original_source: Some(SocketAddr::V4(src)),
+                                    original_destination: Some(SocketAddr::V4(dst)),
+                                }
+                            }
+                            SocketType::Ipv6 => {
+                                let addresses = Ip6Addresses::deserialize(&mut data_buf)?;
+                                let (src, dst) = addresses.into();
+                                ProxyInfo {
+                                    socket_type: t,
+                                    original_source: Some(SocketAddr::V6(src)),
+                                    original_destination: Some(SocketAddr::V6(dst)),
+                                }
+                            }
+                            SocketType::Unknown => ProxyInfo {
+                                socket_type: t,
+                                original_source: None,
+                                original_destination: None,
+                            },
+                        };
+                        self.socket_type = None;
+                        self.remains = 0;
+                        return Ok(Some(info));
+                    }
+                }
+                None => {
+                    if buf.len() < SIZE_HEADER as usize {
+                        return Ok(None);
+                    } else {
+                        let header = Header::deserialize(buf)?;
+                        self.remains = header.len as usize;
+                        match header.protocol {
+                            PROTOCOL_TCP_IP4 => self.socket_type = Some(SocketType::Ipv4),
+                            PROTOCOL_TCP_IP6 => self.socket_type = Some(SocketType::Ipv6),
+                            p => {
+                                warn!("Yet unsupported protocol, code {}", p);
+                                self.socket_type = Some(SocketType::Unknown);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-impl From<Ip6Addresses> for (SocketAddrV6, SocketAddrV6) {
-    fn from(addresses: Ip6Addresses) -> Self {
-        let src_addr = SocketAddrV6::new(addresses.src_addr.into(), addresses.src_port, 0, 0);
-        let dst_addr = SocketAddrV6::new(addresses.dst_addr.into(), addresses.dst_port, 0, 0);
-        (src_addr, dst_addr)
-    }
-}
-
-impl Serialize for Ip6Addresses {
-    fn serialize(&self, buf: &mut BytesMut) {
-        buf.put(&self.src_addr[..]);
-        buf.put(&self.dst_addr[..]);
-        buf.put_u16(self.src_port);
-        buf.put_u16(self.dst_port);
-    }
-
-    fn deserialize(buf: &mut BytesMut) -> Result<Self> {
-        if buf.len() < SIZE_ADDRESSES_IP6 as usize {
-            return Err(Error::AddressIp6(
-                "Too short for IP6 addresses block".into(),
-            ));
+impl Encoder<ProxyInfo> for ProxyProtocolCodecV2 {
+    type Error = Error;
+    fn encode(&mut self, item: ProxyInfo, buf: &mut BytesMut) -> Result<(), Self::Error> {
+        match item.socket_type {
+            SocketType::Ipv4 => {
+                let header = Header::new_tcp4();
+                header.serialize(buf);
+                if let (Some(SocketAddr::V4(src)), Some(SocketAddr::V4(dst))) =
+                    (item.original_source, item.original_destination)
+                {
+                    let addresses: Ip4Addresses = (src, dst).into();
+                    addresses.serialize(buf);
+                } else {
+                    return Err(Error::Proxy("Both V4 addresses must be present".into()));
+                }
+            }
+            _ => unimplemented!(),
         }
-        let mut src_addr = [0; 16];
-        let mut dst_addr = [0; 16];
-        (&mut src_addr[..]).copy_from_slice(&buf[0..16]);
-        buf.advance(16);
-        (&mut dst_addr[..]).copy_from_slice(&buf[0..16]);
-        buf.advance(16);
-        Ok(Ip6Addresses {
-            src_addr,
-            dst_addr,
-            src_port: buf.get_u16(),
-            dst_port: buf.get_u16(),
-        })
-    }
-}
 
-struct UnixAddresses {
-    src_addr: [u8; 108],
-    dst_addr: [u8; 108],
+        Ok(())
+    }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
+    use bytes::BufMut;
 
-    #[test]
-    fn test_header_serialize_deserialize() {
-        let h1 = Header::new_tcp4();
-        let mut buf = BytesMut::new();
-        h1.serialize(&mut buf);
-        let h2 = Header::deserialize(&mut buf).expect("deserialization error");
-        assert_eq!(h1, h2);
-        assert!(buf.is_empty());
+    fn test_msg_ip4(msg: &str) -> BytesMut {
+        let mut output = BytesMut::with_capacity(16 + 12 + msg.len());
+        output.extend_from_slice(SIGNATURE);
+        output.put_u8(0x21);
+        output.put_u8(0x11);
+        output.extend(&[0, 12]);
+        output.extend(&[127, 0, 0, 1]);
+        output.extend(&[127, 0, 0, 2]);
+        output.extend(&[0, 80]);
+        output.extend(&[1, 187]);
+        output.extend(msg.as_bytes());
+        output
     }
 
     #[test]
-    fn test_ip4_addresses_serialize_deserialize() {
-        let src_addr: SocketAddrV4 = "127.0.0.1:1234".parse().unwrap();
-        let dst_addr: SocketAddrV4 = "127.0.0.1:5678".parse().unwrap();
-        let a1: Ip4Addresses = (src_addr.clone(), dst_addr.clone()).into();
-        let mut buf = BytesMut::new();
-        a1.serialize(&mut buf);
-        let a2 = Ip4Addresses::deserialize(&mut buf).unwrap();
-        assert_eq!(a1, a2);
-        assert!(buf.is_empty());
-
-        let (src_addr2, dst_addr2) = a2.into();
-        assert_eq!((src_addr, dst_addr), (src_addr2, dst_addr2));
+    fn test_v2_proxy_decode() {
+        let mut buf = test_msg_ip4("Hello");
+        let mut codec = ProxyProtocolCodecV2::new();
+        let info = codec
+            .decode(&mut buf)
+            .expect("decoding ok")
+            .expect("has enough data");
+        let src_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let dst_addr: SocketAddr = "127.0.0.2:443".parse().unwrap();
+        assert_eq!(Some(src_addr), info.original_source);
+        assert_eq!(Some(dst_addr), info.original_destination);
+        assert_eq!(5, buf.len());
     }
 
     #[test]
-    fn test_ip6_addresses_serialize_deserialize() {
-        let src_addr: SocketAddrV6 = "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ff11]:65535"
-            .parse()
-            .unwrap();
-        let dst_addr: SocketAddrV6 = "[aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aa11]:65534"
-            .parse()
-            .unwrap();
-        let a1: Ip6Addresses = (src_addr.clone(), dst_addr.clone()).into();
+    fn test_v2_encode() {
+        let src_addr: SocketAddr = "127.0.0.1:80".parse().unwrap();
+        let dst_addr: SocketAddr = "127.0.0.2:443".parse().unwrap();
+        let info = ProxyInfo {
+            socket_type: SocketType::Ipv4,
+            original_source: Some(src_addr),
+            original_destination: Some(dst_addr),
+        };
         let mut buf = BytesMut::new();
-        a1.serialize(&mut buf);
-        let a2 = Ip6Addresses::deserialize(&mut buf).unwrap();
-        assert_eq!(a1, a2);
+        let mut codec = ProxyProtocolCodecV2::new();
+        codec.encode(info.clone(), &mut buf).expect("encoding ok");
+        let info2 = codec
+            .decode(&mut buf)
+            .expect("decoding ok")
+            .expect("has enough data");
+        assert_eq!(info, info2);
         assert!(buf.is_empty());
-
-        let (src_addr2, dst_addr2) = a2.into();
-        assert_eq!((src_addr, dst_addr), (src_addr2, dst_addr2));
     }
 }
